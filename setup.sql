@@ -12,6 +12,8 @@ CREATE OR REPLACE TABLE COMMENT_PROPAGATION_STAGING (
     TARGET_COLUMN_FQN VARCHAR COMMENT 'The fully qualified name of the target column where a comment was found.',
     TARGET_COMMENT VARCHAR COMMENT 'The comment found on the target column, or a status if none was found.',
     LINEAGE_DISTANCE INTEGER COMMENT 'The number of steps in the lineage between the source and target objects.',
+    HAS_MULTIPLE_COMMENTS_AT_SAME_DISTANCE BOOLEAN COMMENT 'Flag to indicate if multiple comments were found at the same lineage distance.',
+    STATUS VARCHAR COMMENT 'The status of the comment propagation for this column. One of COMMENT_FOUND, NO_COMMENT_FOUND, or MULTIPLE_COMMENTS_AT_SAME_DISTANCE.',
     RECORD_TIMESTAMP TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP() COMMENT 'The timestamp when this record was created.'
 )
 CHANGE_TRACKING = TRUE

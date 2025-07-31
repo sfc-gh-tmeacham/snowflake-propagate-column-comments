@@ -36,6 +36,8 @@ CREATE OR REPLACE TABLE COMMENT_PROPAGATION_STAGING (
     TARGET_COLUMN_FQN VARCHAR COMMENT 'The fully qualified name of the target column where a comment was found.',
     TARGET_COMMENT VARCHAR COMMENT 'The comment found on the target column, or a status if none was found.',
     LINEAGE_DISTANCE INTEGER COMMENT 'The number of steps in the lineage between the source and target objects.',
+    HAS_MULTIPLE_COMMENTS_AT_SAME_DISTANCE BOOLEAN COMMENT 'Flag to indicate if multiple comments were found at the same lineage distance.',
+    STATUS VARCHAR COMMENT 'The status of the comment propagation for this column. One of COMMENT_FOUND, NO_COMMENT_FOUND, or MULTIPLE_COMMENTS_AT_SAME_DISTANCE.',
     RECORD_TIMESTAMP TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP() COMMENT 'The timestamp when this record was created.'
 )
 CHANGE_TRACKING = TRUE
@@ -51,11 +53,10 @@ The `FIND_AND_RECORD_COMMENT_FOR_COLUMN` procedure contains the core logic for a
 * **Logic:**
     1. Constructs the fully qualified name for the source column (e.g., `MY_DB.MY_SCHEMA.MY_TABLE.MY_COL`).
     2. Calls `GET_LINEAGE` for that specific column to get its downstream dependencies.
-    3. It loops through the downstream lineage objects, ordered by distance.
-    4. For each object, it dynamically constructs and executes a query against `SNOWFLAKE.ACCOUNT_USAGE.COLUMNS` to fetch the comment, ensuring to exclude deleted columns.
-    5. The first non-empty comment found is recorded, and the search loop is broken.
-    6. It uses an `INSERT` statement to log the outcome to `COMMENT_PROPAGATION_STAGING`, tagged with the `RUN_ID`. If no comment was found, it records this status explicitly. The record includes both the individual identifiers and the fully qualified names for the source and target columns.
-* **Error Handling:** The entire procedure is wrapped in a `TRY...CATCH` block to gracefully handle errors and log them.
+    3. It loops through the downstream lineage objects, ordered by distance, joining with `SNOWFLAKE.ACCOUNT_USAGE.COLUMNS` to get comments.
+    4. The first non-empty comment found is recorded. If other comments exist at the same lineage distance, a flag is set. The search loop is then broken.
+    5. It uses a single `INSERT` statement to log the outcome to `COMMENT_PROPAGATION_STAGING`, tagged with the `RUN_ID`. It populates the `STATUS` column and leaves fields `NULL` where no comment was found.
+* **Error Handling:** The entire procedure is wrapped in an `EXCEPTION` block to gracefully handle errors and log them.
 
 ### Step 3: Main Orchestrator Procedure Implementation
 
@@ -63,27 +64,27 @@ The `RECORD_COMMENT_PROPAGATION_DATA` procedure manages the overall process.
 
 * **Parameters:** `P_DATABASE_NAME`, `P_SCHEMA_NAME`, `P_TABLE_NAME`.
 * **Logic:**
-    1. **Generate Run ID:** Creates a unique `RUN_ID` using `UUID_STRING()` for the entire execution.
-    2. **Identify Un-commented Columns:** Queries `SNOWFLAKE.ACCOUNT_USAGE.COLUMNS` to get a list of active (non-deleted) columns in the target table with `NULL` or empty comments.
-    3. **Dispatch Asynchronous Calls:** Loops through the list of un-commented columns and executes `ASYNC CALL FIND_AND_RECORD_COMMENT_FOR_COLUMN(...)` for each one, passing the `RUN_ID` and column details.
-    4. **Wait for Completion:** Uses `AWAIT ALL` to pause execution until all dispatched asynchronous jobs are complete.
+    1. **Validate Table:** Checks if the provided table exists in `SNOWFLAKE.ACCOUNT_USAGE.TABLES`.
+    2. **Generate Run ID:** Creates a unique `RUN_ID` using `UUID_STRING()` for the entire execution.
+    3. **Identify Un-commented Columns:** Queries `SNOWFLAKE.ACCOUNT_USAGE.COLUMNS` to get a list of active (non-deleted) columns in the target table with `NULL` or empty comments.
+    4. **Dispatch Asynchronous Calls:** Loops through the list of un-commented columns and executes `ASYNC CALL FIND_AND_RECORD_COMMENT_FOR_COLUMN(...)` for each one, passing the `RUN_ID` and column details.
+    5. **Wait for Completion:** Uses `AWAIT ALL` to pause execution until all dispatched asynchronous jobs are complete.
 * **Return Value:** Returns a success message including the `RUN_ID` for easy tracking.
-* **Error Handling:** Also wrapped in a `TRY...CATCH` block to report and log any failures during orchestration.
+* **Error Handling:** Also wrapped in an `EXCEPTION` block to report and log any failures during orchestration.
 
 ### Step 4: Structured Logging
 
 Both procedures are instrumented with structured logging using `SYSTEM$LOG_<level>()`.
 
 * **INFO:** Logs the start and end of key processes.
-* **WARN:** Logs when no downstream comment can be found for a column.
-* **DEBUG:** Logs the dynamic SQL statements before execution.
-* **ERROR/FATAL:** Logs the `SQLERRM` message when an exception is caught.
+* **WARN:** Logs when no downstream comment can be found for a column or when multiple comments are found at the same distance.
+* **FATAL/ERROR:** Logs the `SQLERRM` message when an exception is caught.
 
 This requires a Snowflake event table to be set up and configured for the account to capture the logs.
 
 ## Considerations and Best Practices Implemented
 
-* **Asynchronous Performance:** The async architecture dramatically improves performance by allowing Snowflake to process multiple columns in parallel.
+* **Asynchronous Performance:** The async architecture dramatically improves performance by allowing Snowflake to process multiple columns in parallel. This feature requires Snowflake Enterprise Edition or higher.
 * **Correctness:** The logic correctly uses column-level lineage and filters out deleted objects from the `ACCOUNT_USAGE` views.
 * **Row Versioning Strategy:** The use of `RUN_ID` and `INSERT`-only logic provides a full, auditable history of comment suggestions over time.
 * **Deployment Best Practices:** The use of `CREATE OR REPLACE`, `COPY GRANTS`, and `EXECUTE AS OWNER` on all objects ensures that permissions are maintained and deployments are smooth, secure, and idempotent.
