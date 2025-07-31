@@ -1,6 +1,6 @@
 # Plan for Snowflake Stored Procedure: Comment Propagation via Lineage (As-Built)
 
-This document outlines the design of a Snowflake solution that automates the propagation of column comments from downstream tables to upstream tables. It leverages an asynchronous stored procedure architecture, Snowflake's `GET_LINEAGE` function, and `SNOWFLAKE.ACCOUNT_USAGE.COLUMNS` for efficiency.
+This document outlines the design of a Snowflake solution that automates the propagation of column comments from downstream tables to upstream tables. It leverages an asynchronous stored procedure architecture, Snowflake's `GET_LINEAGE` function, and a hybrid approach of using both `INFORMATION_SCHEMA` and `SNOWFLAKE.ACCOUNT_USAGE` for a balance of performance and functionality.
 
 ## Objective
 
@@ -52,7 +52,7 @@ The `FIND_AND_RECORD_COMMENT_FOR_COLUMN` procedure contains the core logic for a
 * **Parameters:** It accepts a `RUN_ID` and all necessary identifiers for the source column.
 * **Logic:**
     1. Constructs the fully qualified name for the source column (e.g., `MY_DB.MY_SCHEMA.MY_TABLE.MY_COL`).
-    2. Calls `GET_LINEAGE` for that specific column to get its downstream dependencies.
+    2. Calls `GET_LINEAGE` for that specific column to get its downstream dependencies. This function requires `ACCOUNT_USAGE` and is subject to its latency.
     3. It loops through the downstream lineage objects, ordered by distance, joining with `SNOWFLAKE.ACCOUNT_USAGE.COLUMNS` to get comments.
     4. The first non-empty comment found is recorded. If other comments exist at the same lineage distance, a flag is set. The search loop is then broken.
     5. It uses a single `INSERT` statement to log the outcome to `COMMENT_PROPAGATION_STAGING`, tagged with the `RUN_ID`. It populates the `STATUS` column and leaves fields `NULL` where no comment was found.
@@ -64,9 +64,9 @@ The `RECORD_COMMENT_PROPAGATION_DATA` procedure manages the overall process.
 
 * **Parameters:** `P_DATABASE_NAME`, `P_SCHEMA_NAME`, `P_TABLE_NAME`.
 * **Logic:**
-    1. **Validate Table:** Checks if the provided table exists in `SNOWFLAKE.ACCOUNT_USAGE.TABLES`.
+    1. **Validate Table:** Checks if the provided table exists in the `INFORMATION_SCHEMA` for real-time validation.
     2. **Generate Run ID:** Creates a unique `RUN_ID` using `UUID_STRING()` for the entire execution.
-    3. **Identify Un-commented Columns:** Queries `SNOWFLAKE.ACCOUNT_USAGE.COLUMNS` to get a list of active (non-deleted) columns in the target table with `NULL` or empty comments.
+    3. **Identify Un-commented Columns:** Queries the `INFORMATION_SCHEMA` to get a real-time list of active columns in the target table with `NULL` or empty comments.
     4. **Dispatch Asynchronous Calls:** Loops through the list of un-commented columns and executes `ASYNC CALL FIND_AND_RECORD_COMMENT_FOR_COLUMN(...)` for each one, passing the `RUN_ID` and column details.
     5. **Wait for Completion:** Uses `AWAIT ALL` to pause execution until all dispatched asynchronous jobs are complete.
 * **Return Value:** Returns a success message including the `RUN_ID` for easy tracking.
@@ -84,11 +84,11 @@ This requires a Snowflake event table to be set up and configured for the accoun
 
 ## Considerations and Best Practices Implemented
 
+* **Hybrid Metadata Approach:** The solution uses `INFORMATION_SCHEMA` for initial table/column lookups to ensure real-time accuracy. However, the core lineage query must still use `SNOWFLAKE.ACCOUNT_USAGE` because the `GET_LINEAGE` function depends on it. This means that while the initial checks are immediate, the lineage data itself is subject to the inherent latency of the `ACCOUNT_USAGE` views (up to 90 minutes).
 * **Asynchronous Performance:** The async architecture dramatically improves performance by allowing Snowflake to process multiple columns in parallel. This feature requires Snowflake Enterprise Edition or higher.
 * **Correctness:** The logic correctly uses column-level lineage and filters out deleted objects from the `ACCOUNT_USAGE` views.
 * **Row Versioning Strategy:** The use of `RUN_ID` and `INSERT`-only logic provides a full, auditable history of comment suggestions over time.
 * **Deployment Best Practices:** The use of `CREATE OR REPLACE`, `COPY GRANTS`, and `EXECUTE AS OWNER` on all objects ensures that permissions are maintained and deployments are smooth, secure, and idempotent.
-* **`ACCOUNT_USAGE` Latency:** The solution relies on `ACCOUNT_USAGE` views, which have a data latency of up to 90 minutes. This means recent changes might not be immediately reflected.
 * **Self-Documentation:** All objects, including tables, columns, and procedures, have `COMMENT` properties to explain their purpose.
 
 ## Future Step: Applying the Comments
