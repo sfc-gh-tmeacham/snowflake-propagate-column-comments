@@ -1,3 +1,7 @@
+-- PERMISSIONS: This procedure relies on SNOWFLAKE.ACCOUNT_USAGE views. The role that creates and
+-- runs this procedure must have the necessary privileges to access this data. It is recommended
+-- to use the ACCOUNTADMIN role or a custom role with imported privileges on the SNOWFLAKE database.
+--
 -- Helper procedure to find and record a comment for a single column.
 CREATE OR REPLACE PROCEDURE FIND_AND_RECORD_COMMENT_FOR_COLUMN(P_RUN_ID VARCHAR, P_DATABASE_NAME VARCHAR, P_SCHEMA_NAME VARCHAR, P_TABLE_NAME VARCHAR, P_UNCOMMENTED_COLUMN_NAME VARCHAR)
   COPY GRANTS

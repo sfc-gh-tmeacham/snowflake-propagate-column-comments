@@ -18,6 +18,12 @@ The solution uses two stored procedures and a helper function:
 
 The results, including the suggested comment or a "not found" status, are logged in the `COMMENT_PROPAGATION_STAGING` table with a unique `RUN_ID`.
 
+## Permissions
+
+This procedure relies on `SNOWFLAKE.ACCOUNT_USAGE` views, which have inherent latency and specific access requirements. To ensure proper execution, the procedure should be created and run by a role with the necessary privileges, such as `ACCOUNTADMIN` or a custom role with imported privileges on the `SNOWFLAKE` database.
+
+For more information on the required permissions, see the [Snowflake documentation on `GET_LINEAGE`](https://docs.snowflake.com/en/sql-reference/functions/get_lineage).
+
 ## Setup
 
 1. **Create the Staging Table:** Run the `setup.sql` script to create the `COMMENT_PROPAGATION_STAGING` table. This table will store the results of the comment propagation process.

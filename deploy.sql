@@ -4,6 +4,10 @@
 -- This script deploys all the necessary objects for the column comment propagation project.
 -- It should be run in a session where the user has the necessary privileges to create objects.
 -- The objects will be created in the current database and schema.
+--
+-- PERMISSIONS: This procedure relies on SNOWFLAKE.ACCOUNT_USAGE views. The role that creates and
+-- runs this procedure must have the necessary privileges to access this data. It is recommended
+-- to use the ACCOUNTADMIN role or a custom role with imported privileges on the SNOWFLAKE database.
 -- *********************************************************************************************************************
 
 -- *********************************************************************************************************************
