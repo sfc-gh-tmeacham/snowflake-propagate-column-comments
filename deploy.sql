@@ -1,3 +1,65 @@
+-- *********************************************************************************************************************
+-- DEPLOYMENT SCRIPT
+-- *********************************************************************************************************************
+-- This script deploys all the necessary objects for the column comment propagation project.
+-- It should be run in a session where the user has the necessary privileges to create objects.
+-- The objects will be created in the current database and schema.
+-- *********************************************************************************************************************
+
+-- *********************************************************************************************************************
+-- 1. `SAFE_QUOTE` Function
+-- This helper function ensures that database identifiers are correctly double-quoted.
+-- *********************************************************************************************************************
+CREATE OR REPLACE FUNCTION SAFE_QUOTE(s VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+IMMUTABLE
+COMMENT = 'Takes an identifier and returns a version that is safely double-quoted, handling cases where the identifier is already quoted or contains quotes.'
+AS
+$$
+DECLARE
+  raw_ident VARCHAR;
+BEGIN
+  IF (STARTSWITH(s, '"') AND ENDSWITH(s, '"')) THEN
+    raw_ident := REPLACE(SUBSTRING(s, 2, LENGTH(s) - 2), '""', '"');
+  ELSE
+    raw_ident := s;
+  END IF;
+  RETURN '"' || REPLACE(raw_ident, '"', '""') || '"';
+END;
+$$;
+
+-- *********************************************************************************************************************
+-- 2. `COMMENT_PROPAGATION_STAGING` Table
+-- This table stores the results of the comment propagation process.
+-- *********************************************************************************************************************
+CREATE OR REPLACE TABLE COMMENT_PROPAGATION_STAGING (
+    RUN_ID VARCHAR COMMENT 'Unique identifier for each run of the data propagation process.',
+    SOURCE_DATABASE_NAME VARCHAR COMMENT 'Database name of the source table.',
+    SOURCE_SCHEMA_NAME VARCHAR COMMENT 'Schema name of the source table.',
+    SOURCE_TABLE_NAME VARCHAR COMMENT 'Table name of the source table.',
+    SOURCE_COLUMN_NAME VARCHAR COMMENT 'Column name in the source table that is missing a comment.',
+    SOURCE_COLUMN_FQN VARCHAR COMMENT 'The fully qualified name of the source column.',
+    TARGET_DATABASE_NAME VARCHAR COMMENT 'Database name of the target object where a comment was found.',
+    TARGET_SCHEMA_NAME VARCHAR COMMENT 'Schema name of the target object where a comment was found.',
+    TARGET_TABLE_NAME VARCHAR COMMENT 'Table name of the target object where a comment was found.',
+    TARGET_COLUMN_NAME VARCHAR COMMENT 'Column name in the target object where a comment was found.',
+    TARGET_COLUMN_FQN VARCHAR COMMENT 'The fully qualified name of the target column where a comment was found.',
+    TARGET_COMMENT VARCHAR COMMENT 'The comment found on the target column, or a status if none was found.',
+    LINEAGE_DISTANCE INTEGER COMMENT 'The number of steps in the lineage between the source and target objects.',
+    HAS_MULTIPLE_COMMENTS_AT_SAME_DISTANCE BOOLEAN COMMENT 'Flag to indicate if multiple comments were found at the same lineage distance.',
+    STATUS VARCHAR COMMENT 'The status of the comment propagation for this column. One of COMMENT_FOUND, NO_COMMENT_FOUND, or MULTIPLE_COMMENTS_AT_SAME_DISTANCE.',
+    RECORD_TIMESTAMP TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP() COMMENT 'The timestamp when this record was created.'
+)
+CHANGE_TRACKING = TRUE
+COPY GRANTS
+COMMENT = 'A staging table that records potential column comments propagated from downstream objects via data lineage.';
+
+-- *********************************************************************************************************************
+-- 3. Stored Procedures
+-- These procedures contain the core logic for the comment propagation process.
+-- *********************************************************************************************************************
+
 -- Helper procedure to find and record a comment for a single column.
 CREATE OR REPLACE PROCEDURE FIND_AND_RECORD_COMMENT_FOR_COLUMN(P_RUN_ID VARCHAR, P_DATABASE_NAME VARCHAR, P_SCHEMA_NAME VARCHAR, P_TABLE_NAME VARCHAR, P_UNCOMMENTED_COLUMN_NAME VARCHAR)
   COPY GRANTS
@@ -86,8 +148,8 @@ BEGIN
       :P_RUN_ID,
       :P_DATABASE_NAME, :P_SCHEMA_NAME, :P_TABLE_NAME, :P_UNCOMMENTED_COLUMN_NAME, :v_source_col_fqn,
       :v_target_db_name, :v_target_schema_name, :v_target_table_name, :v_target_col_name, :v_target_col_fqn,
-      :v_target_comment, :v_lineage_distance, 
-      CASE WHEN v_status = 'NO_COMMENT_FOUND' THEN NULL ELSE v_multiple_comments_found END, 
+      :v_target_comment, :v_lineage_distance,
+      CASE WHEN v_status = 'NO_COMMENT_FOUND' THEN NULL ELSE v_multiple_comments_found END,
       :v_status
   );
 
@@ -139,7 +201,7 @@ BEGIN
     SYSTEM$LOG_FATAL(err_msg);
     RETURN err_msg;
   END IF;
-  
+
   run_id := UUID_STRING();
   SYSTEM$LOG_INFO('Generated RUN_ID: ' || run_id);
 
@@ -158,7 +220,7 @@ BEGIN
     ASYNC CALL FIND_AND_RECORD_COMMENT_FOR_COLUMN(:run_id, :P_DATABASE_NAME, :P_SCHEMA_NAME, :P_TABLE_NAME, :uncommented_column_name);
     total_columns := total_columns + 1;
   END FOR;
-  
+
   IF (total_columns > 0) THEN
     SYSTEM$LOG_INFO('Waiting for ' || total_columns || ' async jobs to complete.');
     AWAIT ALL;
