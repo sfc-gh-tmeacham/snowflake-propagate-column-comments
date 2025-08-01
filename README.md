@@ -1,10 +1,10 @@
 # Snowflake Propagate Column Comments
 
-This project provides a Snowflake stored procedure to automate the propagation of column comments from downstream tables to upstream tables using data lineage.
+This project provides a Snowflake stored procedure to automate the propagation of column comments from ancestor tables (i.e., upstream sources) to descendant tables (i.e., downstream targets) using data lineage.
 
 ## Objective
 
-The primary goal is to identify columns in a given table that lack comments and automatically find a corresponding comment from a downstream column. This is useful for maintaining data documentation and ensuring that comments are consistently applied across your data warehouse.
+The primary goal is to identify columns in a given table that lack comments and automatically find a corresponding comment from an ancestor table in its lineage. This is useful for maintaining data documentation and ensuring that comments are consistently applied as data flows through your data warehouse.
 
 The solution is delivered as a single deployment script that creates two stored procedures:
 
@@ -19,7 +19,7 @@ The solution uses a single deployment script (`deploy.sql`) to create all the ne
 
 1. **`SAFE_QUOTE` UDF**: A helper function that ensures database identifiers are correctly double-quoted, making the procedures robust against non-standard names.
 2. **`COMMENT_PROPAGATION_STAGING` Table**: A table that logs the results of the comment propagation process, including suggested comments or a "not found" status, with a unique `RUN_ID`.
-3. **`RECORD_COMMENT_PROPAGATION_DATA`**: The main procedure that identifies all columns in a table that are missing comments and finds potential comments for them in downstream tables.
+3. **`RECORD_COMMENT_PROPAGATION_DATA`**: The main procedure that identifies all columns in a table that are missing comments and finds potential comments for them in ancestor tables.
 4. **`APPLY_COMMENT_PROPAGATION_DATA`**: A procedure that applies the comments found by the `RECORD_COMMENT_PROPAGATION_DATA` procedure.
 
 ## Permissions
@@ -54,7 +54,7 @@ The `STATUS` column will indicate the outcome for each column:
 
 * `COMMENT_FOUND`: A single comment was found at the closest lineage distance.
 * `MULTIPLE_COMMENTS_AT_SAME_DISTANCE`: Multiple comments were found at the same, closest lineage distance.
-* `NO_COMMENT_FOUND`: No downstream comment was found.
+* `NO_COMMENT_FOUND`: No comment was found in any ancestor table.
 
 ```sql
 -- Replace 'your_run_id' with the actual RUN_ID
