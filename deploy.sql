@@ -5,9 +5,10 @@
 -- It should be run in a session where the user has the necessary privileges to create objects.
 -- The objects will be created in the current database and schema.
 --
--- PERMISSIONS: This procedure relies on SNOWFLAKE.ACCOUNT_USAGE views. The role that creates and
--- runs this procedure must have the necessary privileges to access this data. It is recommended
--- to use the ACCOUNTADMIN role or a custom role with imported privileges on the SNOWFLAKE database.
+-- PERMISSIONS: This procedure relies on SNOWFLAKE.CORE.GET_LINEAGE and the INFORMATION_SCHEMA.
+-- The role that creates and runs this procedure must have the necessary privileges to access this data.
+-- Specifically, it needs USAGE on all upstream databases to query their INFORMATION_SCHEMA.
+-- It is recommended to use a role with broad read privileges or a custom role with specific USAGE grants.
 -- *********************************************************************************************************************
 
 -- *********************************************************************************************************************
@@ -70,6 +71,18 @@ DECLARE
   table_fqn VARCHAR;
   v_table_exists INT;
   rows_inserted INTEGER DEFAULT 0;
+  
+  -- Variables for dynamic query generation
+  db_info_schema_fqn VARCHAR;
+  insert_query VARCHAR;
+  db_name VARCHAR;
+  
+  -- Cursor to get distinct upstream databases from lineage
+  distinct_db_cursor CURSOR FOR
+    SELECT DISTINCT TARGET_OBJECT_DATABASE
+    FROM temp_lineage
+    WHERE TARGET_OBJECT_DATABASE IS NOT NULL;
+    
 BEGIN
   -- Validate that input parameters are not NULL.
   IF (P_DATABASE_NAME IS NULL OR P_SCHEMA_NAME IS NULL OR P_TABLE_NAME IS NULL) THEN
@@ -79,14 +92,13 @@ BEGIN
   END IF;
 
   table_fqn := SAFE_QUOTE(P_DATABASE_NAME) || '.' || SAFE_QUOTE(P_SCHEMA_NAME) || '.' || SAFE_QUOTE(P_TABLE_NAME);
+  db_info_schema_fqn := SAFE_QUOTE(P_DATABASE_NAME) || '.INFORMATION_SCHEMA';
   SYSTEM$LOG_INFO('Starting RECORD_COMMENT_PROPAGATION_DATA for table: ' || table_fqn);
 
-  -- Check if table exists using INFORMATION_SCHEMA for real-time results.
+  -- Check if table exists using INFORMATION_SCHEMA.
   SELECT COUNT(1) INTO :v_table_exists
-  FROM INFORMATION_SCHEMA.TABLES
-  WHERE TABLE_CATALOG = :P_DATABASE_NAME
-    AND TABLE_SCHEMA = :P_SCHEMA_NAME
-    AND TABLE_NAME = :P_TABLE_NAME;
+  FROM IDENTIFIER(:db_info_schema_fqn || '.TABLES')
+  WHERE TABLE_SCHEMA = :P_SCHEMA_NAME AND TABLE_NAME = :P_TABLE_NAME;
 
   IF (v_table_exists = 0) THEN
     LET err_msg := 'ERROR: Table ' || table_fqn || ' not found.';
@@ -97,8 +109,57 @@ BEGIN
   run_id := UUID_STRING();
   SYSTEM$LOG_INFO('Generated RUN_ID: ' || run_id);
 
-  -- This single INSERT statement finds all uncommented columns, gets their lineage,
-  -- finds the closest comment, determines the status, and inserts into the staging table.
+  -- Step 1: Find uncommented columns using a direct query against INFORMATION_SCHEMA.
+  CREATE OR REPLACE TEMPORARY TABLE temp_uncommented_columns AS
+    SELECT
+      TABLE_CATALOG AS source_database_name,
+      TABLE_SCHEMA AS source_schema_name,
+      TABLE_NAME AS source_table_name,
+      COLUMN_NAME AS source_column_name,
+      SAFE_QUOTE(TABLE_CATALOG) || '.' || SAFE_QUOTE(TABLE_SCHEMA) || '.' || SAFE_QUOTE(TABLE_NAME) || '.' || SAFE_QUOTE(COLUMN_NAME) as source_column_fqn
+    FROM IDENTIFIER(:db_info_schema_fqn || '.COLUMNS')
+    WHERE TABLE_SCHEMA = :P_SCHEMA_NAME 
+      AND TABLE_NAME = :P_TABLE_NAME 
+      AND (COMMENT IS NULL OR COMMENT = '');
+
+  -- Step 2: Get the raw upstream lineage for all uncommented columns.
+  CREATE OR REPLACE TEMPORARY TABLE temp_lineage AS
+  SELECT
+      uc.source_column_fqn,
+      l.TARGET_OBJECT_DATABASE,
+      l.TARGET_OBJECT_SCHEMA,
+      l.TARGET_OBJECT_NAME,
+      l.TARGET_COLUMN_NAME,
+      l.DISTANCE
+  FROM temp_uncommented_columns uc,
+  LATERAL (SELECT * FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(uc.source_column_fqn, 'COLUMN', 'UPSTREAM'))) l;
+
+  -- Step 3: Create a temporary table to hold all comments gathered from INFORMATION_SCHEMA.
+  CREATE OR REPLACE TEMPORARY TABLE temp_all_upstream_column_comments (
+      table_catalog VARCHAR,
+      table_schema VARCHAR,
+      table_name VARCHAR,
+      column_name VARCHAR,
+      comment VARCHAR
+  );
+  
+  -- Step 4: Asynchronously launch an INSERT...SELECT job for each distinct upstream database.
+  SYSTEM$LOG_INFO('Starting asynchronous gathering of comments from upstream INFORMATION_SCHEMA views.');
+  OPEN distinct_db_cursor;
+  FOR rec IN distinct_db_cursor DO
+      db_name := rec.TARGET_OBJECT_DATABASE;
+      insert_query := 'INSERT INTO temp_all_upstream_column_comments (table_catalog, table_schema, table_name, column_name, comment) ' ||
+                      'SELECT table_catalog, table_schema, table_name, column_name, comment FROM ' || 
+                      SAFE_QUOTE(db_name) || '.INFORMATION_SCHEMA.COLUMNS WHERE comment IS NOT NULL AND comment <> ''''';
+      ASYNC EXECUTE IMMEDIATE :insert_query;
+  END FOR;
+  CLOSE distinct_db_cursor;
+  
+  -- Step 5: Wait for all the asynchronous INSERT jobs to complete.
+  AWAIT ALL;
+  SYSTEM$LOG_INFO('Asynchronous comment gathering complete.');
+
+  -- Step 6: Join the lineage with the comments, rank them, and insert the final results into the staging table.
   INSERT INTO COMMENT_PROPAGATION_STAGING (
       RUN_ID,
       SOURCE_DATABASE_NAME, SOURCE_SCHEMA_NAME, SOURCE_TABLE_NAME, SOURCE_COLUMN_NAME, SOURCE_COLUMN_FQN,
@@ -106,37 +167,22 @@ BEGIN
       TARGET_COMMENT, LINEAGE_DISTANCE, STATUS
   )
   WITH
-  uncommented_columns AS (
-    SELECT
-      c.TABLE_CATALOG AS source_database_name,
-      c.TABLE_SCHEMA AS source_schema_name,
-      c.TABLE_NAME AS source_table_name,
-      c.COLUMN_NAME AS source_column_name,
-      SAFE_QUOTE(c.TABLE_CATALOG) || '.' || SAFE_QUOTE(c.TABLE_SCHEMA) || '.' || SAFE_QUOTE(c.TABLE_NAME) || '.' || SAFE_QUOTE(c.COLUMN_NAME) as source_column_fqn
-    FROM INFORMATION_SCHEMA.COLUMNS c
-    WHERE c.TABLE_CATALOG = :P_DATABASE_NAME
-      AND c.TABLE_SCHEMA = :P_SCHEMA_NAME
-      AND c.TABLE_NAME = :P_TABLE_NAME
-      AND (c.COMMENT IS NULL OR c.COMMENT = '')
-  ),
   lineage_with_comments AS (
       SELECT
-          uc.source_column_fqn,
-          l.TARGET_OBJECT_DATABASE AS target_database_name,
-          l.TARGET_OBJECT_SCHEMA AS target_schema_name,
-          l.TARGET_OBJECT_NAME AS target_table_name,
-          l.TARGET_COLUMN_NAME AS target_column_name,
-          SAFE_QUOTE(l.TARGET_OBJECT_DATABASE) || '.' || SAFE_QUOTE(l.TARGET_OBJECT_SCHEMA) || '.' || SAFE_QUOTE(l.TARGET_OBJECT_NAME) || '.' || SAFE_QUOTE(l.TARGET_COLUMN_NAME) as target_column_fqn,
-          c.COMMENT AS target_comment,
-          l.DISTANCE AS lineage_distance
-      FROM uncommented_columns uc,
-      LATERAL (SELECT * FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(uc.source_column_fqn, 'COLUMN', 'UPSTREAM'))) l
-      JOIN SNOWFLAKE.ACCOUNT_USAGE.COLUMNS c
-        ON l.TARGET_OBJECT_DATABASE = c.TABLE_CATALOG
-        AND l.TARGET_OBJECT_SCHEMA = c.TABLE_SCHEMA
-        AND l.TARGET_OBJECT_NAME = c.TABLE_NAME
-        AND l.TARGET_COLUMN_NAME = c.COLUMN_NAME
-      WHERE c.COMMENT IS NOT NULL AND c.COMMENT <> ''
+          lin.source_column_fqn,
+          c.table_catalog AS target_database_name,
+          c.table_schema AS target_schema_name,
+          c.table_name AS target_table_name,
+          c.column_name AS target_column_name,
+          SAFE_QUOTE(c.table_catalog) || '.' || SAFE_QUOTE(c.table_schema) || '.' || SAFE_QUOTE(c.table_name) || '.' || SAFE_QUOTE(c.column_name) as target_column_fqn,
+          c.comment AS target_comment,
+          lin.DISTANCE AS lineage_distance
+      FROM temp_lineage lin
+      JOIN temp_all_upstream_column_comments c
+        ON lin.TARGET_OBJECT_DATABASE = c.table_catalog
+        AND lin.TARGET_OBJECT_SCHEMA = c.table_schema
+        AND lin.TARGET_OBJECT_NAME = c.table_name
+        AND lin.TARGET_COLUMN_NAME = c.column_name
   ),
   ranked_lineage AS (
       SELECT
@@ -164,7 +210,7 @@ BEGIN
           WHEN rl.comments_at_this_distance > 1 THEN 'MULTIPLE_COMMENTS_AT_SAME_DISTANCE'
           ELSE 'COMMENT_FOUND'
       END as status
-  FROM uncommented_columns uc
+  FROM temp_uncommented_columns uc
   LEFT JOIN ranked_lineage rl
     ON uc.source_column_fqn = rl.source_column_fqn AND rl.rn = 1;
 
@@ -200,6 +246,7 @@ DECLARE
   v_run_id_exists INT;
   alter_sql VARCHAR;
   v_table_fqn VARCHAR;
+  v_failed_columns VARCHAR;
   v_application_timestamp TIMESTAMP_LTZ;
 BEGIN
   v_application_timestamp := CURRENT_TIMESTAMP();
@@ -267,7 +314,17 @@ BEGIN
         total_comments_applied := total_comments_applied + table_rec.comments_to_apply;
     EXCEPTION
         WHEN OTHER THEN
-            LET err_msg := 'Failed to apply ' || table_rec.comments_to_apply || ' comment(s) for table ' || v_table_fqn || ': ' || SQLERRM;
+            -- Capture the list of columns that failed to be updated for better logging.
+            SELECT LISTAGG(SOURCE_COLUMN_NAME, ', ')
+            INTO :v_failed_columns
+            FROM COMMENT_PROPAGATION_STAGING
+            WHERE RUN_ID = :P_RUN_ID
+              AND STATUS = 'COMMENT_FOUND'
+              AND SOURCE_DATABASE_NAME = table_rec.SOURCE_DATABASE_NAME
+              AND SOURCE_SCHEMA_NAME = table_rec.SOURCE_SCHEMA_NAME
+              AND SOURCE_TABLE_NAME = table_rec.SOURCE_TABLE_NAME;
+
+            LET err_msg := 'Failed to apply ' || table_rec.comments_to_apply || ' comment(s) for table ' || v_table_fqn || '. Columns: [' || :v_failed_columns || ']. Error: ' || SQLERRM;
             SYSTEM$LOG_ERROR(err_msg);
 
             UPDATE COMMENT_PROPAGATION_STAGING

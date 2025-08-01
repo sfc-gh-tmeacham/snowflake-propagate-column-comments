@@ -8,8 +8,8 @@ The primary goal is to identify columns in a given table that lack comments and 
 
 The solution is delivered as a single deployment script that creates two stored procedures:
 
-1. **`RECORD_COMMENT_PROPAGATION_DATA`**: The main procedure that you call to find and record comment suggestions in a staging table.
-2. **`APPLY_COMMENT_PROPAGATION_DATA`**: A second procedure that you call to apply the suggestions from the staging table.
+1.  **`RECORD_COMMENT_PROPAGATION_DATA`**: The main procedure that you call to find and record comment suggestions in a staging table.
+2.  **`APPLY_COMMENT_PROPAGATION_DATA`**: A second procedure that you call to apply the suggestions from the staging table.
 
 This two-step process allows you to review the suggested comments before applying them.
 
@@ -17,16 +17,23 @@ This two-step process allows you to review the suggested comments before applyin
 
 The solution uses a single deployment script (`deploy.sql`) to create all the necessary database objects:
 
-1. **`SAFE_QUOTE` UDF**: A helper function that ensures database identifiers are correctly double-quoted, making the procedures robust against non-standard names.
-2. **`COMMENT_PROPAGATION_STAGING` Table**: A table that logs the results of the comment propagation process, including suggested comments or a "not found" status, with a unique `RUN_ID`.
-3. **`RECORD_COMMENT_PROPAGATION_DATA`**: The main procedure that identifies all columns in a table that are missing comments and finds potential comments for them in ancestor tables.
-4. **`APPLY_COMMENT_PROPAGATION_DATA`**: A procedure that applies the comments found by the `RECORD_COMMENT_PROPAGATION_DATA` procedure.
+1.  **`SAFE_QUOTE` UDF**: A helper function that ensures database identifiers are correctly double-quoted, making the procedures robust against non-standard names.
+2.  **`COMMENT_PROPAGATION_STAGING` Table**: A table that logs the results of the comment propagation process, including suggested comments or a "not found" status, with a unique `RUN_ID`.
+3.  **`RECORD_COMMENT_PROPAGATION_DATA`**: The main procedure that identifies all columns in a table that are missing comments and finds potential comments for them in ancestor tables.
+4.  **`APPLY_COMMENT_PROPAGATION_DATA`**: A procedure that applies the comments found by the `RECORD_COMMENT_PROPAGATION_DATA` procedure.
 
 ## Permissions
 
-This procedure relies on `SNOWFLAKE.ACCOUNT_USAGE` views, which have inherent latency and specific access requirements. To ensure proper execution, the procedure should be created and run by a role with the necessary privileges, such as `ACCOUNTADMIN` or a custom role with imported privileges on the `SNOWFLAKE` database.
+This procedure relies on `SNOWFLAKE.CORE.GET_LINEAGE` and the `INFORMATION_SCHEMA` for each upstream database. Unlike `SNOWFLAKE.ACCOUNT_USAGE` views, the `INFORMATION_SCHEMA` provides real-time data, ensuring the results are always current.
 
-For more information on the required permissions, see the [Snowflake documentation on `GET_LINEAGE`](https://docs.snowflake.com/en/sql-reference/functions/get_lineage).
+To ensure proper execution, the procedure should be created and run by a role with the following privileges:
+
+*   **`USAGE` on all upstream databases**: The role must have the `USAGE` privilege on every database that contains a potential source table in the lineage. This is required to query the `INFORMATION_SCHEMA.COLUMNS` view in those databases.
+*   **Privileges on the target table**: The role needs standard read privileges on the target table to identify uncommented columns and write privileges to apply new comments.
+
+A role with broad read privileges (like `ACCOUNTADMIN` or a dedicated data governance role) is recommended.
+
+For more information on the required permissions for lineage, see the [Snowflake documentation on `GET_LINEAGE`](https://docs.snowflake.com/en/sql-reference/functions/get_lineage).
 
 ## Setup
 
@@ -52,9 +59,9 @@ After the procedure completes, you can query the `COMMENT_PROPAGATION_STAGING` t
 
 The `STATUS` column will indicate the outcome for each column:
 
-* `COMMENT_FOUND`: A single comment was found at the closest lineage distance.
-* `MULTIPLE_COMMENTS_AT_SAME_DISTANCE`: Multiple comments were found at the same, closest lineage distance.
-* `NO_COMMENT_FOUND`: No comment was found in any ancestor table.
+*   `COMMENT_FOUND`: A single comment was found at the closest lineage distance.
+*   `MULTIPLE_COMMENTS_AT_SAME_DISTANCE`: Multiple comments were found at the same, closest lineage distance.
+*   `NO_COMMENT_FOUND`: No comment was found in any ancestor table.
 
 ```sql
 -- Replace 'your_run_id' with the actual RUN_ID
