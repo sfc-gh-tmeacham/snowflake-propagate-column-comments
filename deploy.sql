@@ -134,7 +134,16 @@ BEGIN
   FROM temp_uncommented_columns uc,
   LATERAL (SELECT * FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(uc.source_column_fqn, 'COLUMN', 'UPSTREAM'))) l;
 
-  -- Step 3: Create a temporary table to hold all comments gathered from INFORMATION_SCHEMA.
+  -- Step 3: Get distinct upstream objects that might contain comments.
+  CREATE OR REPLACE TEMPORARY TABLE temp_upstream_objects AS
+  SELECT DISTINCT
+      TARGET_OBJECT_DATABASE,
+      TARGET_OBJECT_SCHEMA,
+      TARGET_OBJECT_NAME
+  FROM temp_lineage
+  WHERE TARGET_OBJECT_DATABASE IS NOT NULL;
+
+  -- Step 4: Create a temporary table to hold the comments for the relevant upstream columns.
   CREATE OR REPLACE TEMPORARY TABLE temp_all_upstream_column_comments (
       table_catalog VARCHAR,
       table_schema VARCHAR,
@@ -143,21 +152,23 @@ BEGIN
       comment VARCHAR
   );
   
-  -- Step 4: Asynchronously launch an INSERT...SELECT job for each distinct upstream database.
-  SYSTEM$LOG_INFO('Starting asynchronous gathering of comments from upstream INFORMATION_SCHEMA views.');
+  -- Step 5: For each upstream database, get comments only for the specific objects identified in the lineage.
+  SYSTEM$LOG_INFO('Starting targeted gathering of comments from upstream INFORMATION_SCHEMA views.');
   OPEN distinct_db_cursor;
   FOR rec IN distinct_db_cursor DO
       db_name := rec.TARGET_OBJECT_DATABASE;
       insert_query := 'INSERT INTO temp_all_upstream_column_comments (table_catalog, table_schema, table_name, column_name, comment) ' ||
-                      'SELECT table_catalog, table_schema, table_name, column_name, comment FROM ' || 
-                      SAFE_QUOTE(db_name) || '.INFORMATION_SCHEMA.COLUMNS WHERE comment IS NOT NULL AND comment <> ''''';
-      ASYNC EXECUTE IMMEDIATE :insert_query;
+                      'SELECT c.table_catalog, c.table_schema, c.table_name, c.column_name, c.comment ' ||
+                      'FROM ' || SAFE_QUOTE(db_name) || '.INFORMATION_SCHEMA.COLUMNS c ' ||
+                      'JOIN temp_upstream_objects uo ' ||
+                      '  ON c.table_catalog = uo.TARGET_OBJECT_DATABASE ' ||
+                      ' AND c.table_schema = uo.TARGET_OBJECT_SCHEMA ' ||
+                      ' AND c.table_name = uo.TARGET_OBJECT_NAME ' ||
+                      'WHERE c.comment IS NOT NULL AND c.comment <> ''''';
+      EXECUTE IMMEDIATE :insert_query;
   END FOR;
   CLOSE distinct_db_cursor;
-  
-  -- Step 5: Wait for all the asynchronous INSERT jobs to complete.
-  AWAIT ALL;
-  SYSTEM$LOG_INFO('Asynchronous comment gathering complete.');
+  SYSTEM$LOG_INFO('Targeted comment gathering complete.');
 
   -- Step 6: Join the lineage with the comments, rank them, and insert the final results into the staging table.
   INSERT INTO COMMENT_PROPAGATION_STAGING (
@@ -270,7 +281,7 @@ BEGIN
     RETURN err_msg;
   END IF;
 
-  -- Group comments by table and build a single ALTER TABLE statement for each.
+  -- To minimize DDL executions, iterate through each table that has pending comments.
   FOR table_rec IN (
     SELECT
         SOURCE_DATABASE_NAME,
@@ -284,7 +295,7 @@ BEGIN
   DO
     v_table_fqn := SAFE_QUOTE(table_rec.SOURCE_DATABASE_NAME) || '.' || SAFE_QUOTE(table_rec.SOURCE_SCHEMA_NAME) || '.' || SAFE_QUOTE(table_rec.SOURCE_TABLE_NAME);
     
-    -- Use LISTAGG to build the column alteration list in a single query
+    -- Dynamically construct a single ALTER TABLE statement that updates all column comments for the current table in one operation.
     SELECT
       'ALTER TABLE ' || :v_table_fqn || ' ALTER ' ||
       LISTAGG(
@@ -300,6 +311,8 @@ BEGIN
       AND SOURCE_SCHEMA_NAME = table_rec.SOURCE_SCHEMA_NAME
       AND SOURCE_TABLE_NAME = table_rec.SOURCE_TABLE_NAME;
 
+    -- Execute the dynamic DDL. By wrapping this in its own BEGIN/EXCEPTION block,
+    -- we ensure that a failure on one table does not halt the entire procedure.
     BEGIN
         SYSTEM$LOG_INFO('Executing: ' || alter_sql);
         EXECUTE IMMEDIATE alter_sql;
