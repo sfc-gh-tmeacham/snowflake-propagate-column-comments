@@ -98,11 +98,11 @@ This procedure will only apply comments that have been staged and will skip any 
 
 ## Testing
 
-The project includes a comprehensive test suite (`test.sql`) that:
+The project includes a comprehensive test suite (`testing/test.sql`) that:
 
 * Creates realistic multi-hop lineage scenarios
 * Tests comment propagation across multiple tables
 * Validates both successful and edge-case scenarios
 * Provides automated verification of results
 
-To run the tests, execute `test.sql` after deploying the solution.
+To run the tests, execute `testing/test.sql` after deploying the solution.
