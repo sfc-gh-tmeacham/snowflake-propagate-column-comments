@@ -79,6 +79,7 @@ DECLARE
   v_table_exists INT;
   rows_inserted INTEGER DEFAULT 0;
   v_count INTEGER DEFAULT 0;
+  err_msg VARCHAR;
 
   -- Variables for dynamic query generation
   db_info_schema_fqn VARCHAR;
@@ -96,7 +97,7 @@ DECLARE
 BEGIN
   -- Validate that input parameters are not NULL.
   IF (P_DATABASE_NAME IS NULL OR P_SCHEMA_NAME IS NULL OR P_TABLE_NAME IS NULL) THEN
-    LET err_msg := 'ERROR in RECORD_COMMENT_PROPAGATION_DATA: Input parameters cannot be NULL.';
+    err_msg := 'ERROR in RECORD_COMMENT_PROPAGATION_DATA: Input parameters cannot be NULL.';
     SYSTEM$LOG_FATAL(err_msg);
     RETURN err_msg;
   END IF;
@@ -116,7 +117,7 @@ BEGIN
   WHERE TABLE_SCHEMA = :P_SCHEMA_NAME AND TABLE_NAME = :P_TABLE_NAME;
 
   IF (v_table_exists = 0) THEN
-    LET err_msg := 'ERROR: Table ' || table_fqn || ' not found.';
+    err_msg := 'ERROR: Table ' || table_fqn || ' not found.';
     SYSTEM$LOG_FATAL(err_msg);
     RETURN err_msg;
   END IF;
@@ -344,11 +345,12 @@ DECLARE
   v_table_fqn VARCHAR;
   v_failed_columns VARCHAR;
   v_application_timestamp TIMESTAMP_LTZ;
+  err_msg VARCHAR;
 BEGIN
   v_application_timestamp := CURRENT_TIMESTAMP();
   -- Validate that the RUN_ID is not NULL.
   IF (P_RUN_ID IS NULL) THEN
-    LET err_msg := 'ERROR in APPLY_COMMENT_PROPAGATION_DATA: Input RUN_ID cannot be NULL.';
+    err_msg := 'ERROR in APPLY_COMMENT_PROPAGATION_DATA: Input RUN_ID cannot be NULL.';
     SYSTEM$LOG_FATAL(err_msg);
     RETURN err_msg;
   END IF;
@@ -361,43 +363,58 @@ BEGIN
   WHERE RUN_ID = :P_RUN_ID;
 
   IF (v_run_id_exists = 0) THEN
-    LET err_msg := 'ERROR: RUN_ID ' || P_RUN_ID || ' not found in COMMENT_PROPAGATION_STAGING.';
+    err_msg := 'ERROR: RUN_ID ' || P_RUN_ID || ' not found in COMMENT_PROPAGATION_STAGING.';
     SYSTEM$LOG_FATAL(err_msg);
     RETURN err_msg;
   END IF;
 
-  -- To minimize DDL executions, iterate through each table that has pending comments.
-  FOR table_rec IN (
-    SELECT
+  -- Since each RUN_ID corresponds to a single table, get the table info directly
+  DECLARE
+    v_source_database_name VARCHAR;
+    v_source_schema_name VARCHAR;
+    v_source_table_name VARCHAR;
+    v_comments_to_apply INTEGER;
+  BEGIN
+    -- Get the table information and count of comments to apply
+    SELECT DISTINCT
         SOURCE_DATABASE_NAME,
         SOURCE_SCHEMA_NAME,
         SOURCE_TABLE_NAME,
-        COUNT(*) as comments_to_apply
+        COUNT(*) OVER () as comments_to_apply
+    INTO
+        :v_source_database_name,
+        :v_source_schema_name,
+        :v_source_table_name,
+        :v_comments_to_apply
     FROM COMMENT_PROPAGATION_STAGING
     WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL
-    GROUP BY 1, 2, 3
-  )
-  DO
-    v_table_fqn := SAFE_QUOTE(table_rec.SOURCE_DATABASE_NAME) || '.' || SAFE_QUOTE(table_rec.SOURCE_SCHEMA_NAME) || '.' || SAFE_QUOTE(table_rec.SOURCE_TABLE_NAME);
+    LIMIT 1;
+
+    -- If no records found, exit early
+    IF (v_comments_to_apply = 0 OR v_source_database_name IS NULL) THEN
+      LET success_msg := 'No comments to apply for RUN_ID: ' || P_RUN_ID;
+      SYSTEM$LOG_INFO(success_msg);
+      RETURN success_msg;
+    END IF;
+
+    v_table_fqn := SAFE_QUOTE(v_source_database_name) || '.' || SAFE_QUOTE(v_source_schema_name) || '.' || SAFE_QUOTE(v_source_table_name);
     
-    -- Dynamically construct a single ALTER TABLE statement that updates all column comments for the current table in one operation.
+    -- Dynamically construct a single ALTER TABLE statement that updates all column comments for the table in one operation.
     SELECT
-      'ALTER TABLE ' || :v_table_fqn || ' ALTER (' ||
+      'ALTER TABLE ' || :v_table_fqn || ' MODIFY COLUMN ' ||
       LISTAGG(
-          CONCAT('COLUMN ', SAFE_QUOTE(SOURCE_COLUMN_NAME), ' SET COMMENT ''', REPLACE(TARGET_COMMENT, '''', ''''''), ''''),
+          CONCAT(SAFE_QUOTE(SOURCE_COLUMN_NAME), ' COMMENT ''', REPLACE(TARGET_COMMENT, '''', ''''''), ''''),
           ', '
-      ) || ')'
+      )
     INTO
       alter_sql
     FROM COMMENT_PROPAGATION_STAGING
     WHERE RUN_ID = :P_RUN_ID
       AND STATUS = 'COMMENT_FOUND'
-      AND SOURCE_DATABASE_NAME = table_rec.SOURCE_DATABASE_NAME
-      AND SOURCE_SCHEMA_NAME = table_rec.SOURCE_SCHEMA_NAME
-      AND SOURCE_TABLE_NAME = table_rec.SOURCE_TABLE_NAME;
+      AND APPLICATION_STATUS IS NULL;
 
     -- Execute the dynamic DDL. By wrapping this in its own BEGIN/EXCEPTION block,
-    -- we ensure that a failure on one table does not halt the entire procedure.
+    -- we ensure that a failure does not halt the entire procedure.
     BEGIN
         SYSTEM$LOG_INFO('Executing: ' || alter_sql);
         EXECUTE IMMEDIATE alter_sql;
@@ -406,12 +423,9 @@ BEGIN
         SET APPLICATION_STATUS = 'APPLIED', APPLICATION_TIMESTAMP = :v_application_timestamp
         WHERE RUN_ID = :P_RUN_ID
           AND STATUS = 'COMMENT_FOUND'
-          AND APPLICATION_STATUS IS NULL
-          AND SOURCE_DATABASE_NAME = table_rec.SOURCE_DATABASE_NAME
-          AND SOURCE_SCHEMA_NAME = table_rec.SOURCE_SCHEMA_NAME
-          AND SOURCE_TABLE_NAME = table_rec.SOURCE_TABLE_NAME;
+          AND APPLICATION_STATUS IS NULL;
         
-        total_comments_applied := total_comments_applied + table_rec.comments_to_apply;
+        total_comments_applied := total_comments_applied + v_comments_to_apply;
     EXCEPTION
         WHEN OTHER THEN
             -- Capture the list of columns that failed to be updated for better logging.
@@ -420,25 +434,20 @@ BEGIN
             FROM COMMENT_PROPAGATION_STAGING
             WHERE RUN_ID = :P_RUN_ID
               AND STATUS = 'COMMENT_FOUND'
-              AND SOURCE_DATABASE_NAME = table_rec.SOURCE_DATABASE_NAME
-              AND SOURCE_SCHEMA_NAME = table_rec.SOURCE_SCHEMA_NAME
-              AND SOURCE_TABLE_NAME = table_rec.SOURCE_TABLE_NAME;
+              AND APPLICATION_STATUS IS NULL;
 
-            LET err_msg := 'Failed to apply ' || table_rec.comments_to_apply || ' comment(s) for table ' || v_table_fqn || '. Columns: [' || :v_failed_columns || ']. Error: ' || SQLERRM;
+            err_msg := 'Failed to apply ' || v_comments_to_apply || ' comment(s) for table ' || v_table_fqn || '. Columns: [' || :v_failed_columns || ']. Error: ' || SQLERRM;
             SYSTEM$LOG_ERROR(err_msg);
 
             UPDATE COMMENT_PROPAGATION_STAGING
             SET APPLICATION_STATUS = 'SKIPPED', APPLICATION_TIMESTAMP = :v_application_timestamp
             WHERE RUN_ID = :P_RUN_ID
               AND STATUS = 'COMMENT_FOUND'
-              AND APPLICATION_STATUS IS NULL
-              AND SOURCE_DATABASE_NAME = table_rec.SOURCE_DATABASE_NAME
-              AND SOURCE_SCHEMA_NAME = table_rec.SOURCE_SCHEMA_NAME
-              AND SOURCE_TABLE_NAME = table_rec.SOURCE_TABLE_NAME;
+              AND APPLICATION_STATUS IS NULL;
 
-            total_comments_skipped := total_comments_skipped + table_rec.comments_to_apply;
+            total_comments_skipped := total_comments_skipped + v_comments_to_apply;
     END;
-  END FOR;
+  END;
 
   LET success_msg := 'Success: Applied ' || total_comments_applied || ' comments and skipped ' || total_comments_skipped || ' for RUN_ID: ' || P_RUN_ID;
   SYSTEM$LOG_INFO(success_msg);
@@ -446,7 +455,7 @@ BEGIN
 
 EXCEPTION
     WHEN OTHER THEN
-        LET err_msg := 'ERROR in APPLY_COMMENT_PROPAGATION_DATA for RUN_ID ' || P_RUN_ID || ': ' || SQLERRM;
+        err_msg := 'ERROR in APPLY_COMMENT_PROPAGATION_DATA for RUN_ID ' || P_RUN_ID || ': ' || SQLERRM;
         SYSTEM$LOG_FATAL(err_msg);
         RETURN err_msg;
 END;
