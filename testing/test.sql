@@ -1,11 +1,13 @@
 -- *********************************************************************************************************************
--- TEST SCRIPT V3
+-- TEST SCRIPT V4
 -- *********************************************************************************************************************
 -- This script provides a comprehensive, automated test for the column comment propagation project.
 -- It creates a dedicated schema and a series of tables with lineage to test various scenarios.
 -- The script uses assertions to automatically verify the results, making it suitable for automated testing.
 -- *********************************************************************************************************************
 
+-- *********************************************************************************************************************
+-- Test Case 1: Single-Table Propagation
 -- *********************************************************************************************************************
 -- 1. SETUP: Create a dedicated test schema and tables
 -- *********************************************************************************************************************
@@ -64,14 +66,6 @@ SET RUN_ID = SPLIT_PART($CALL_RESULT, 'RUN_ID: ', 2);
 -- *********************************************************************************************************************
 -- 3. VERIFICATION (Part 1): Check the staging table for correct status and comments.
 -- *********************************************************************************************************************
--- Expected Outcomes:
--- ID: COMMENT_FOUND from BASE_TABLE (distance 2).
--- FIRST_NAME: MULTIPLE_COMMENTS_AT_SAME_DISTANCE because the comment on MIDSTREAM is closer.
--- LAST_NAME: COMMENT_FOUND from MIDSTREAM_TABLE (distance 1).
--- EMAIL: COMMENT_FOUND from BASE_TABLE (distance 2).
--- STATUS: COMMENT_FOUND from BASE_TABLE (distance 2).
--- CREATED_AT: COMMENT_FOUND from BASE_TABLE (distance 2).
-
 CREATE OR REPLACE TEMPORARY PROCEDURE VERIFY_STAGING_TABLE(RUN_ID_PARAM VARCHAR)
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -136,7 +130,7 @@ EXECUTE IMMEDIATE $apply_call_stmt;
 -- *********************************************************************************************************************
 -- 5. VERIFICATION (Part 2): Check that comments were physically applied to the final table.
 -- *********************************************************************************************************************
-CREATE OR REPLACE TEMPORARY PROCEDURE VERIFY_APPLIED_COMMENTS(SCHEMA_NAME_PARAM VARCHAR)
+CREATE OR REPLACE TEMPORARY PROCEDURE VERIFY_APPLIED_COMMENTS(SCHEMA_NAME_PARAM VARCHAR, TABLE_NAME_PARAM VARCHAR)
 RETURNS VARCHAR
 LANGUAGE SQL
 AS
@@ -153,7 +147,7 @@ BEGIN
     :v_applied_comment_count,
     :v_uncommented_count
   FROM INFORMATION_SCHEMA.COLUMNS
-  WHERE TABLE_SCHEMA = :SCHEMA_NAME_PARAM AND TABLE_NAME = 'FINAL_TABLE';
+  WHERE TABLE_SCHEMA = :SCHEMA_NAME_PARAM AND TABLE_NAME = :TABLE_NAME_PARAM;
 
   -- Assert that the correct number of comments were applied.
   IF (v_applied_comment_count != 6) THEN
@@ -173,10 +167,72 @@ END;
 $$;
 
 -- Call the verification procedure
-CALL VERIFY_APPLIED_COMMENTS($TEST_SCHEMA_NAME);
-
+CALL VERIFY_APPLIED_COMMENTS($TEST_SCHEMA_NAME, 'FINAL_TABLE');
 
 -- *********************************************************************************************************************
--- 6. CLEANUP: Drop the test schema and all its objects
+-- Test Case 2: Schema-Level Propagation
+-- *********************************************************************************************************************
+-- 1. SETUP: Create a fresh schema and tables
+-- *********************************************************************************************************************
+CREATE OR REPLACE SCHEMA TEST_SCHEMA_BATCH;
+USE SCHEMA TEST_SCHEMA_BATCH;
+
+CREATE OR REPLACE TABLE BASE_TABLE LIKE TEST_SCHEMA.BASE_TABLE;
+CREATE OR REPLACE TABLE MIDSTREAM_TABLE LIKE TEST_SCHEMA.MIDSTREAM_TABLE;
+CREATE OR REPLACE TABLE FINAL_TABLE_1 AS SELECT * FROM MIDSTREAM_TABLE;
+CREATE OR REPLACE TABLE FINAL_TABLE_2 AS SELECT * FROM MIDSTREAM_TABLE;
+
+-- *********************************************************************************************************************
+-- 2. EXECUTION: Run the schema-level propagation procedure
+-- *********************************************************************************************************************
+SET SCHEMA_PROC_FQN = $DEPLOY_DB || '.' || $DEPLOY_SCHEMA || '.PROPAGATE_COMMENTS_FOR_SCHEMA';
+SET schema_call_stmt = 'CALL ' || $SCHEMA_PROC_FQN || ' (''' || $TEST_DB || ''', ''TEST_SCHEMA_BATCH'')';
+EXECUTE IMMEDIATE $schema_call_stmt;
+
+-- *********************************************************************************************************************
+-- 3. VERIFICATION: Check the VARIANT output for success
+-- *********************************************************************************************************************
+CREATE OR REPLACE TEMPORARY PROCEDURE VERIFY_BATCH_RUN()
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
+DECLARE
+  v_success_count INTEGER;
+  v_total_count INTEGER;
+  assertion_failed EXCEPTION (-20003, 'An assertion failed.');
+BEGIN
+  SELECT
+    COUNT_IF(VALUE:status::STRING = 'SUCCESS'),
+    COUNT(*)
+  INTO
+    :v_success_count,
+    :v_total_count
+  FROM
+    TABLE(RESULT_SCAN(LAST_QUERY_ID())),
+    LATERAL FLATTEN(input => "PROPAGATE_COMMENTS_FOR_SCHEMA");
+
+  -- There are 4 tables, all should succeed
+  IF (v_success_count != 4) THEN
+    RAISE assertion_failed;
+  END IF;
+  IF (v_total_count != 4) THEN
+    RAISE assertion_failed;
+  END IF;
+
+  RETURN 'Batch run verification successful!';
+EXCEPTION
+    WHEN assertion_failed THEN
+        RETURN 'Assertion failed in VERIFY_BATCH_RUN. ' ||
+               'SUCCESS_COUNT=' || :v_success_count || ', ' ||
+               'TOTAL_COUNT=' || :v_total_count;
+END;
+$$;
+
+CALL VERIFY_BATCH_RUN();
+
+-- *********************************************************************************************************************
+-- 4. CLEANUP: Drop both test schemas
 -- *********************************************************************************************************************
 DROP SCHEMA IF EXISTS TEST_SCHEMA;
+DROP SCHEMA IF EXISTS TEST_SCHEMA_BATCH;
