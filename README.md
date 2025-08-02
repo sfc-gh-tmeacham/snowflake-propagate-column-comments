@@ -63,6 +63,8 @@ The `STATUS` column will indicate the outcome for each column:
 * `MULTIPLE_COMMENTS_AT_SAME_DISTANCE`: Multiple comments were found at the same, closest lineage distance.
 * `NO_COMMENT_FOUND`: No comment was found in any ancestor table.
 
+> **Note**: The `MULTIPLE_COMMENTS_AT_SAME_DISTANCE` status is only triggered for ties at the *closest* distance. If comments exist at multiple distances (e.g., a comment is found 1 hop away and another is 2 hops away), the procedure will always choose the closest one, and the status will be `COMMENT_FOUND`.
+
 ```sql
 -- Replace 'your_run_id' with the actual RUN_ID
 SELECT * FROM COMMENT_PROPAGATION_STAGING WHERE RUN_ID = 'your_run_id';
