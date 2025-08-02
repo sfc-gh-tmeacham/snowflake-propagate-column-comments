@@ -66,7 +66,7 @@ All procedures are instrumented with:
 
 ## Considerations and Best Practices Implemented
 
-* **Correct GET_LINEAGE Usage**: Extracts SOURCE_OBJECT_* columns (not TARGET_OBJECT_*) for upstream lineage, as GET_LINEAGE returns relationship edges
+* **Correct GET_LINEAGE Usage**: Extracts `SOURCE_OBJECT_*` columns (not `TARGET_OBJECT_*`) for upstream lineage, as GET_LINEAGE returns relationship edges
 * **Column-Specific Filtering**: Queries INFORMATION_SCHEMA for specific (schema, table, column) tuples rather than all commented columns from upstream tables
 * **Proper DDL Syntax**: Uses `ALTER TABLE ... MODIFY COLUMN` syntax for applying multiple column comments efficiently
 * **Variable Scoping**: Uses regular variables instead of cursor record variables in complex query contexts to avoid identifier resolution issues
