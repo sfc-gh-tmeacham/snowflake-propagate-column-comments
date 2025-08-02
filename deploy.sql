@@ -159,7 +159,7 @@ BEGIN
     FETCH c1 INTO v_column_fqn;
     WHILE (v_column_fqn IS NOT NULL) DO
         INSERT INTO temp_lineage (source_column_fqn, TARGET_OBJECT_DATABASE, TARGET_OBJECT_SCHEMA, TARGET_OBJECT_NAME, TARGET_COLUMN_NAME, DISTANCE)
-        SELECT :v_column_fqn, l.TARGET_OBJECT_DATABASE, l.TARGET_OBJECT_SCHEMA, l.TARGET_OBJECT_NAME, l.TARGET_COLUMN_NAME, l.DISTANCE
+        SELECT :v_column_fqn, l.SOURCE_OBJECT_DATABASE, l.SOURCE_OBJECT_SCHEMA, l.SOURCE_OBJECT_NAME, l.SOURCE_COLUMN_NAME, l.DISTANCE - 1
         FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(:v_column_fqn, 'COLUMN', 'UPSTREAM')) l;
         FETCH c1 INTO v_column_fqn;
     END WHILE;
@@ -191,7 +191,7 @@ BEGIN
     );
     SYSTEM$ADD_EVENT('Step 4: Prepare comments table - Finished');
 
-    -- Step 5: For each upstream database, get comments only for the specific objects identified in the lineage.
+    -- Step 5: For each upstream database, get comments only for the specific columns identified in the lineage.
     SYSTEM$ADD_EVENT('Step 5: Gather comments - Started');
     LET temp_table_for_dynamic_sql := 'temp_all_upstream_column_comments_' || REPLACE(UUID_STRING(), '-', '_');
     EXECUTE IMMEDIATE 'CREATE OR REPLACE TABLE ' || temp_table_for_dynamic_sql || ' (table_catalog VARCHAR, table_schema VARCHAR, table_name VARCHAR, column_name VARCHAR, comment VARCHAR)';
@@ -200,22 +200,32 @@ BEGIN
     FETCH c2 INTO db_name;
     WHILE (db_name IS NOT NULL) DO
         SYSTEM$ADD_EVENT('Querying for comments', {'database_name': :db_name});
-        insert_query := 'INSERT INTO ' || temp_table_for_dynamic_sql || ' (table_catalog, table_schema, table_name, column_name, comment) ' ||
-                          'SELECT c.table_catalog, c.table_schema, c.table_name, c.column_name, c.comment ' ||
-                          'FROM ' || SAFE_QUOTE(db_name) || '.INFORMATION_SCHEMA.COLUMNS c ' ||
-                          'WHERE c.comment IS NOT NULL AND c.comment <> '''' AND EXISTS (' ||
-                          '  SELECT 1 FROM temp_upstream_objects uo ' ||
-                          '  WHERE c.table_catalog = uo.TARGET_OBJECT_DATABASE ' ||
-                          '    AND c.table_schema = uo.TARGET_OBJECT_SCHEMA ' ||
-                          '    AND c.table_name = uo.TARGET_OBJECT_NAME' ||
-                          ')';
-        EXECUTE IMMEDIATE :insert_query;
+
+        DECLARE
+            column_list_literal VARCHAR;
+        BEGIN
+            SELECT LISTAGG(
+                CONCAT('(\'', REPLACE(TARGET_OBJECT_SCHEMA, '''', ''''''), '\',\'', REPLACE(TARGET_OBJECT_NAME, '''', ''''''), '\',\'', REPLACE(TARGET_COLUMN_NAME, '''', ''''''), '\')'),
+                ', '
+            )
+            INTO :column_list_literal
+            FROM (SELECT DISTINCT TARGET_OBJECT_SCHEMA, TARGET_OBJECT_NAME, TARGET_COLUMN_NAME FROM temp_lineage WHERE TARGET_OBJECT_DATABASE = :db_name);
+
+            IF (column_list_literal IS NOT NULL AND column_list_literal <> '') THEN
+                insert_query := 'INSERT INTO ' || temp_table_for_dynamic_sql || ' (table_catalog, table_schema, table_name, column_name, comment) ' ||
+                                'SELECT c.table_catalog, c.table_schema, c.table_name, c.column_name, c.comment ' ||
+                                'FROM ' || SAFE_QUOTE(db_name) || '.INFORMATION_SCHEMA.COLUMNS c ' ||
+                                'WHERE (c.table_schema, c.table_name, c.column_name) IN (' || column_list_literal || ')' ||
+                                ' AND c.comment IS NOT NULL AND c.comment <> ''''';
+                EXECUTE IMMEDIATE :insert_query;
+            END IF;
+        END;
         FETCH c2 INTO db_name;
     END WHILE;
     CLOSE c2;
     
     EXECUTE IMMEDIATE 'INSERT INTO temp_all_upstream_column_comments SELECT * FROM ' || temp_table_for_dynamic_sql;
-    EXECUTE IMMEDIATE 'DROP TABLE ' || temp_table_for_dynamic_sql;
+    -- EXECUTE IMMEDIATE 'DROP TABLE ' || temp_table_for_dynamic_sql;
 
     SELECT COUNT(*) INTO :v_count FROM temp_all_upstream_column_comments;
     SYSTEM$ADD_EVENT('Step 5: Gather comments - Finished', {'total_comments_found': :v_count});
@@ -241,7 +251,7 @@ BEGIN
             c.comment AS target_comment,
             lin.DISTANCE AS lineage_distance
         FROM temp_lineage lin
-        JOIN temp_all_upstream_column_comments c
+        LEFT JOIN temp_all_upstream_column_comments c
           ON lin.TARGET_OBJECT_DATABASE = c.table_catalog
           AND lin.TARGET_OBJECT_SCHEMA = c.table_schema
           AND lin.TARGET_OBJECT_NAME = c.table_name
@@ -253,6 +263,7 @@ BEGIN
             COUNT(*) OVER (PARTITION BY source_column_fqn, lineage_distance) as comments_at_this_distance,
             ROW_NUMBER() OVER (PARTITION BY source_column_fqn ORDER BY lineage_distance) as rn
         FROM lineage_with_comments
+        WHERE target_comment IS NOT NULL AND target_comment <> ''
     ),
     COMMENT_PROPAGATION_LOGIC AS (
         SELECT
