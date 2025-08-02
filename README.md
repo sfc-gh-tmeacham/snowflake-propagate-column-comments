@@ -19,8 +19,8 @@ The solution uses a single deployment script (`deploy.sql`) to create all the ne
 
 1. **`SAFE_QUOTE` UDF**: A helper function that ensures database identifiers are correctly double-quoted, making the procedures robust against non-standard names.
 2. **`COMMENT_PROPAGATION_STAGING` Table**: A table that logs the results of the comment propagation process, including suggested comments or a "not found" status, with a unique `RUN_ID`.
-3. **`RECORD_COMMENT_PROPAGATION_DATA`**: The main procedure that identifies all columns in a table that are missing comments and finds potential comments for them in ancestor tables.
-4. **`APPLY_COMMENT_PROPAGATION_DATA`**: A procedure that applies the comments found by the `RECORD_COMMENT_PROPAGATION_DATA` procedure.
+3. **`RECORD_COMMENT_PROPAGATION_DATA`**: The main procedure that identifies all columns in a table that are missing comments and finds potential comments for them in ancestor tables using Snowflake's `GET_LINEAGE` function to trace complete multi-hop lineage paths.
+4. **`APPLY_COMMENT_PROPAGATION_DATA`**: A procedure that applies the comments found by the `RECORD_COMMENT_PROPAGATION_DATA` procedure using optimized `ALTER TABLE ... MODIFY COLUMN` statements.
 
 ## Permissions
 
@@ -78,3 +78,23 @@ CALL APPLY_COMMENT_PROPAGATION_DATA('your_run_id');
 ```
 
 This procedure will only apply comments that have been staged and will skip any that have multiple suggestions or where no comment was found, ensuring a safe and controlled update process.
+
+## Key Features
+
+- **Multi-hop lineage support**: Traces comments through complex data pipelines (e.g., `BASE_TABLE` → `MIDSTREAM_TABLE` → `FINAL_TABLE`)
+- **Distance-based ranking**: Selects comments from the closest upstream source when multiple options exist
+- **Batch DDL operations**: Applies multiple column comments in a single `ALTER TABLE` statement for efficiency
+- **Comprehensive logging**: Includes detailed tracing and error handling for production use
+- **Idempotent execution**: Safe to re-run procedures multiple times
+- **Real-time lineage**: Uses live `GET_LINEAGE` data, not cached `ACCOUNT_USAGE` views
+
+## Testing
+
+The project includes a comprehensive test suite (`test.sql`) that:
+
+- Creates realistic multi-hop lineage scenarios
+- Tests comment propagation across multiple tables
+- Validates both successful and edge-case scenarios
+- Provides automated verification of results
+
+To run the tests, execute `test.sql` after deploying the solution.
