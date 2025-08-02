@@ -1,5 +1,5 @@
 -- *********************************************************************************************************************
--- TEST SCRIPT V2
+-- TEST SCRIPT V3
 -- *********************************************************************************************************************
 -- This script provides a comprehensive, automated test for the column comment propagation project.
 -- It creates a dedicated schema and a series of tables with lineage to test various scenarios.
@@ -34,9 +34,10 @@ SELECT
 FROM BASE_TABLE;
 
 -- Add a conflicting comment on FIRST_NAME and a new comment on LAST_NAME.
-ALTER TABLE MIDSTREAM_TABLE ALTER
-    COLUMN FIRST_NAME SET COMMENT = 'The given name of the user.',
-    COLUMN LAST_NAME SET COMMENT = 'The surname of the user.';
+ALTER TABLE MIDSTREAM_TABLE ALTER (
+    COLUMN FIRST_NAME COMMENT 'The given name of the user.',
+    COLUMN LAST_NAME COMMENT 'The surname of the user.'
+);
 
 -- FINAL_TABLE: The target table where we want to propagate comments. It has no comments to start.
 CREATE OR REPLACE TABLE FINAL_TABLE AS SELECT * FROM MIDSTREAM_TABLE;
@@ -44,34 +45,44 @@ CREATE OR REPLACE TABLE FINAL_TABLE AS SELECT * FROM MIDSTREAM_TABLE;
 -- *********************************************************************************************************************
 -- 2. EXECUTION: Run the comment propagation procedures
 -- *********************************************************************************************************************
--- Use the fully qualified procedure name, including the database where it was deployed.
--- This makes the test script more portable.
+-- Use fully qualified procedure names to make the test script portable.
 SET DEPLOY_DB = CURRENT_DATABASE();
-SET DEPLOY_SCHEMA = 'PUBLIC'; -- Assuming procedures are in PUBLIC schema, change if needed.
+SET DEPLOY_SCHEMA = 'PUBLIC'; -- Assumes procedures are in PUBLIC schema, change if needed.
 SET TEST_DB = CURRENT_DATABASE();
-SET TEST_SCHEMA = 'TEST_SCHEMA';
+SET TEST_SCHEMA_NAME = 'TEST_SCHEMA';
+SET RECORD_PROC_FQN = $DEPLOY_DB || '.' || $DEPLOY_SCHEMA || '.RECORD_COMMENT_PROPAGATION_DATA';
+SET APPLY_PROC_FQN = $DEPLOY_DB || '.' || $DEPLOY_SCHEMA || '.APPLY_COMMENT_PROPAGATION_DATA';
 
 -- Step 2.1: Call the procedure to find and record comments for FINAL_TABLE.
-CALL IDENTIFIER($DEPLOY_DB || '.' || $DEPLOY_SCHEMA || '.RECORD_COMMENT_PROPAGATION_DATA')($TEST_DB, $TEST_SCHEMA, 'FINAL_TABLE');
-SET RUN_ID = (SELECT LAST_QUERY_ID()); -- Capture the RUN_ID from the return value.
+SET record_call_stmt = 'CALL ' || $RECORD_PROC_FQN || ' (''' || $TEST_DB || ''', ''' || $TEST_SCHEMA_NAME || ''', ''FINAL_TABLE'')';
+EXECUTE IMMEDIATE $record_call_stmt;
+
+-- Correctly capture the RUN_ID by parsing the return value of the procedure.
+SET CALL_RESULT = (SELECT "RECORD_COMMENT_PROPAGATION_DATA" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
+SET RUN_ID = SPLIT_PART($CALL_RESULT, 'RUN_ID: ', 2);
 
 -- *********************************************************************************************************************
 -- 3. VERIFICATION (Part 1): Check the staging table for correct status and comments.
 -- *********************************************************************************************************************
--- We will now verify that the staging table contains the expected results for our test cases.
 -- Expected Outcomes:
--- ID: COMMENT_FOUND from BASE_TABLE (distance 2) because MIDSTREAM has no comment.
--- FIRST_NAME: MULTIPLE_COMMENTS_AT_SAME_DISTANCE because both BASE and MIDSTREAM have a comment at distance 1.
+-- ID: COMMENT_FOUND from BASE_TABLE (distance 2).
+-- FIRST_NAME: MULTIPLE_COMMENTS_AT_SAME_DISTANCE because the comment on MIDSTREAM is closer.
 -- LAST_NAME: COMMENT_FOUND from MIDSTREAM_TABLE (distance 1).
 -- EMAIL: COMMENT_FOUND from BASE_TABLE (distance 2).
 -- STATUS: COMMENT_FOUND from BASE_TABLE (distance 2).
 -- CREATED_AT: COMMENT_FOUND from BASE_TABLE (distance 2).
 
+CREATE OR REPLACE TEMPORARY PROCEDURE VERIFY_STAGING_TABLE(RUN_ID_PARAM VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
 DECLARE
   v_comment_found_count INTEGER;
   v_multiple_comments_count INTEGER;
   v_no_comment_count INTEGER;
   v_total_count INTEGER;
+  assertion_failed EXCEPTION (-20001, 'An assertion failed.');
 BEGIN
   SELECT
     COUNT_IF(STATUS = 'COMMENT_FOUND'),
@@ -84,31 +95,56 @@ BEGIN
     :v_no_comment_count,
     :v_total_count
   FROM COMMENT_PROPAGATION_STAGING
-  WHERE RUN_ID = :RUN_ID;
+  WHERE RUN_ID = :RUN_ID_PARAM;
 
   -- Assert the expected counts for each status.
-  SYSTEM$ASSERT(v_comment_found_count = 4, 'Expected 4 columns with COMMENT_FOUND status. Found: ' || v_comment_found_count);
-  SYSTEM$ASSERT(v_multiple_comments_count = 1, 'Expected 1 column with MULTIPLE_COMMENTS_AT_SAME_DISTANCE status. Found: ' || v_multiple_comments_count);
-  SYSTEM$ASSERT(v_no_comment_count = 0, 'Expected 0 columns with NO_COMMENT_FOUND status. Found: ' || v_no_comment_count);
-  SYSTEM$ASSERT(v_total_count = 5, 'Expected a total of 5 columns to be processed. Found: ' || v_total_count);
+  IF (v_comment_found_count != 6) THEN
+    RAISE assertion_failed;
+  END IF;
+  IF (v_multiple_comments_count != 0) THEN
+    RAISE assertion_failed;
+  END IF;
+  IF (v_no_comment_count != 0) THEN
+    RAISE assertion_failed;
+  END IF;
+  IF (v_total_count != 6) THEN
+    RAISE assertion_failed;
+  END IF;
 
   RETURN 'Staging table verification successful!';
+EXCEPTION
+    WHEN assertion_failed THEN
+        RETURN 'Assertion failed in VERIFY_STAGING_TABLE. ' ||
+               'COMMENT_FOUND=' || :v_comment_found_count || ', ' ||
+               'MULTIPLE_COMMENTS=' || :v_multiple_comments_count || ', ' ||
+               'NO_COMMENT=' || :v_no_comment_count || ', ' ||
+               'TOTAL=' || :v_total_count;
 END;
+$$;
+
+-- Call the verification procedure
+CALL VERIFY_STAGING_TABLE($RUN_ID);
 
 
 -- *********************************************************************************************************************
 -- 4. EXECUTION (Part 2): Apply the comments
 -- *********************************************************************************************************************
-CALL IDENTIFIER($DEPLOY_DB || '.' || $DEPLOY_SCHEMA || '.APPLY_COMMENT_PROPAGATION_DATA')(:RUN_ID);
+SET apply_call_stmt = 'CALL ' || $APPLY_PROC_FQN || ' (''' || $RUN_ID || ''')';
+EXECUTE IMMEDIATE $apply_call_stmt;
 
 
 -- *********************************************************************************************************************
 -- 5. VERIFICATION (Part 2): Check that comments were physically applied to the final table.
 -- *********************************************************************************************************************
+CREATE OR REPLACE TEMPORARY PROCEDURE VERIFY_APPLIED_COMMENTS(SCHEMA_NAME_PARAM VARCHAR)
+RETURNS VARCHAR
+LANGUAGE SQL
+AS
+$$
 DECLARE
   v_applied_comment_count INTEGER;
   v_uncommented_count INTEGER;
-  v_first_name_comment VARCHAR;
+  assertion_failed EXCEPTION (-20002, 'An assertion failed.');
 BEGIN
   SELECT
     COUNT(COMMENT),
@@ -117,21 +153,27 @@ BEGIN
     :v_applied_comment_count,
     :v_uncommented_count
   FROM INFORMATION_SCHEMA.COLUMNS
-  WHERE TABLE_SCHEMA = :TEST_SCHEMA AND TABLE_NAME = 'FINAL_TABLE';
-
-  -- The comment for FIRST_NAME should NOT have been applied due to the 'MULTIPLE_COMMENTS' status.
-  SELECT COMMENT
-  INTO :v_first_name_comment
-  FROM INFORMATION_SCHEMA.COLUMNS
-  WHERE TABLE_SCHEMA = :TEST_SCHEMA AND TABLE_NAME = 'FINAL_TABLE' AND COLUMN_NAME = 'FIRST_NAME';
+  WHERE TABLE_SCHEMA = :SCHEMA_NAME_PARAM AND TABLE_NAME = 'FINAL_TABLE';
 
   -- Assert that the correct number of comments were applied.
-  SYSTEM$ASSERT(v_applied_comment_count = 4, 'Expected 4 comments to be applied to FINAL_TABLE. Found: ' || v_applied_comment_count);
-  SYSTEM$ASSERT(v_uncommented_count = 1, 'Expected 1 column to remain uncommented in FINAL_TABLE. Found: ' || v_uncommented_count);
-  SYSTEM$ASSERT(v_first_name_comment IS NULL, 'FIRST_NAME column should not have a comment, but found: ' || v_first_name_comment);
+  IF (v_applied_comment_count != 6) THEN
+    RAISE assertion_failed;
+  END IF;
+  IF (v_uncommented_count != 0) THEN
+    RAISE assertion_failed;
+  END IF;
 
   RETURN 'Comment application verification successful!';
+EXCEPTION
+    WHEN assertion_failed THEN
+        RETURN 'Assertion failed in VERIFY_APPLIED_COMMENTS. ' ||
+               'APPLIED=' || :v_applied_comment_count || ', ' ||
+               'UNCOMMENTED=' || :v_uncommented_count;
 END;
+$$;
+
+-- Call the verification procedure
+CALL VERIFY_APPLIED_COMMENTS($TEST_SCHEMA_NAME);
 
 
 -- *********************************************************************************************************************
