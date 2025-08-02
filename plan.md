@@ -59,9 +59,10 @@ This procedure applies the comments found in the staging table.
 ### Step 4: Structured Logging and Tracing
 
 All procedures are instrumented with:
-- Structured logging using `SYSTEM$LOG_<level>()` for clear monitoring and debugging
-- Custom tracing using `SYSTEM$ADD_EVENT` and `SYSTEM$SET_SPAN_ATTRIBUTES` for detailed execution metrics
-- Comprehensive error handling with detailed context in exception messages
+
+* Structured logging using `SYSTEM$LOG_<level>()` for clear monitoring and debugging
+* Custom tracing using `SYSTEM$ADD_EVENT` and `SYSTEM$SET_SPAN_ATTRIBUTES` for detailed execution metrics
+* Comprehensive error handling with detailed context in exception messages
 
 ## Considerations and Best Practices Implemented
 
