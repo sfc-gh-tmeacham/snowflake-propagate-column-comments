@@ -195,7 +195,7 @@ BEGIN
     -- Step 5: For each upstream database, get comments only for the specific columns identified in the lineage.
     SYSTEM$ADD_EVENT('Step 5: Gather comments - Started');
     LET temp_table_for_dynamic_sql := 'temp_all_upstream_column_comments_' || REPLACE(UUID_STRING(), '-', '_');
-    EXECUTE IMMEDIATE 'CREATE OR REPLACE TABLE ' || temp_table_for_dynamic_sql || ' (table_catalog VARCHAR, table_schema VARCHAR, table_name VARCHAR, column_name VARCHAR, comment VARCHAR)';
+    EXECUTE IMMEDIATE 'CREATE OR REPLACE TEMPORARY TABLE ' || temp_table_for_dynamic_sql || ' (table_catalog VARCHAR, table_schema VARCHAR, table_name VARCHAR, column_name VARCHAR, comment VARCHAR)';
     
     OPEN c2;
     FETCH c2 INTO db_name;
@@ -226,7 +226,7 @@ BEGIN
     CLOSE c2;
     
     EXECUTE IMMEDIATE 'INSERT INTO temp_all_upstream_column_comments SELECT * FROM ' || temp_table_for_dynamic_sql;
-    -- EXECUTE IMMEDIATE 'DROP TABLE ' || temp_table_for_dynamic_sql;
+    EXECUTE IMMEDIATE 'DROP TABLE ' || temp_table_for_dynamic_sql;
 
     SELECT COUNT(*) INTO :v_count FROM temp_all_upstream_column_comments;
     SYSTEM$ADD_EVENT('Step 5: Gather comments - Finished', {'total_comments_found': :v_count});
