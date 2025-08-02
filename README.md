@@ -81,20 +81,26 @@ This procedure will only apply comments that have been staged and will skip any 
 
 ## Key Features
 
-- **Multi-hop lineage support**: Traces comments through complex data pipelines (e.g., `BASE_TABLE` → `MIDSTREAM_TABLE` → `FINAL_TABLE`)
-- **Distance-based ranking**: Selects comments from the closest upstream source when multiple options exist
-- **Batch DDL operations**: Applies multiple column comments in a single `ALTER TABLE` statement for efficiency
-- **Comprehensive logging**: Includes detailed tracing and error handling for production use
-- **Idempotent execution**: Safe to re-run procedures multiple times
-- **Real-time lineage**: Uses live `GET_LINEAGE` data, not cached `ACCOUNT_USAGE` views
+* **Multi-hop lineage support**: Traces comments through complex data pipelines (e.g., `BASE_TABLE` → `MIDSTREAM_TABLE` → `FINAL_TABLE`)
+* **Distance-based ranking**: Selects comments from the closest upstream source when multiple options exist
+* **Batch DDL operations**: Applies multiple column comments in a single `ALTER TABLE` statement for efficiency
+* **Comprehensive logging**: Includes detailed tracing and error handling for production use
+* **Idempotent execution**: Safe to re-run procedures multiple times
+* **Real-time lineage**: Uses live `GET_LINEAGE` data, not cached `ACCOUNT_USAGE` views
+
+## Limitations
+
+* **Maximum lineage distance**: The solution is limited by Snowflake's `GET_LINEAGE` function, which has a maximum distance of 5 levels. This means the procedure can trace comments through at most 5 hops in the data lineage (e.g., `TABLE_A` → `TABLE_B` → `TABLE_C` → `TABLE_D` → `TABLE_E` → `TABLE_F`). Comments from ancestor tables beyond this distance will not be discovered.
+
+  **Workaround**: For lineage chains longer than 5 hops, apply the comment propagation procedures first on upstream tables within the 5-hop range. Once those intermediate tables have comments, they become discoverable sources for tables further downstream, effectively extending the reach of comment propagation through the entire lineage chain.
 
 ## Testing
 
 The project includes a comprehensive test suite (`test.sql`) that:
 
-- Creates realistic multi-hop lineage scenarios
-- Tests comment propagation across multiple tables
-- Validates both successful and edge-case scenarios
-- Provides automated verification of results
+* Creates realistic multi-hop lineage scenarios
+* Tests comment propagation across multiple tables
+* Validates both successful and edge-case scenarios
+* Provides automated verification of results
 
 To run the tests, execute `test.sql` after deploying the solution.
