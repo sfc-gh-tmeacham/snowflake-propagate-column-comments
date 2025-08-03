@@ -248,16 +248,6 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
         lineage_path_count = temp_lineage_df.count()
         telemetry.add_event('Step 2: Discover lineage - Finished', {'lineage_path_count': lineage_path_count})
 
-        # Accurately count parents at the closest distance before considering comments.
-        closest_distance_df = temp_lineage_df.groupBy("source_column_fqn").agg(min("DISTANCE").alias("min_distance"))
-        
-        parent_count_df = temp_lineage_df.join(
-            closest_distance_df,
-            "source_column_fqn"
-        ).filter(
-            col("DISTANCE") == col("min_distance")
-        ).groupBy("source_column_fqn").agg(count("*").alias("parents_at_closest_distance"))
-
         # Step 4 & 5: Gather comments from all unique upstream databases and tables.
         telemetry.add_event('Step 5: Gather comments - Started')
 
@@ -328,12 +318,9 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
 
         comment_propagation_logic = uncommented_columns_df.join(
             ranked_lineage.filter(col("rn") == 1), "source_column_fqn", "left"
-        ).join(
-            parent_count_df, "source_column_fqn", "left"
         ).withColumn(
             "status",
             when(col("target_comment").is_null(), lit("NO_COMMENT_FOUND"))
-            .when(col("parents_at_closest_distance") > 1, lit("MULTIPLE_PARENTS_FOUND"))
             .when(col("comments_at_this_distance") > 1, lit("MULTIPLE_COMMENTS_AT_SAME_DISTANCE"))
             .otherwise(lit("COMMENT_FOUND"))
         )
@@ -342,7 +329,7 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
             lit(run_id).alias("RUN_ID"),
             "source_database_name", "source_schema_name", "source_table_name", "source_column_name", "source_column_fqn",
             "target_database_name", "target_schema_name", "target_table_name", "target_column_name", "target_column_fqn",
-            when(col("status") == "MULTIPLE_PARENTS_FOUND", lit(None).cast(StringType())).otherwise(col("target_comment")).alias("target_comment"),
+            col("target_comment"),
             "lineage_distance", "status",
             current_timestamp().alias("RECORD_TIMESTAMP"),
             lit(None).cast(StringType()).alias("APPLICATION_STATUS"),
@@ -383,7 +370,7 @@ CALL IDENTIFIER($FQN_PROCEDURE)($TEST_DB_NAME_1, $SCHEMA_NAME_1, 'TARGET_TABLE')
 -- - EXTRA_DATA:    Comment from L2_ALT
 -- - EXTRA_ID:      Comment from L2_ALT
 -- - FIRST_NAME:    Comment from L2
--- - FULL_NAME:     No comment (derived column with multiple parents) -> MULTIPLE_PARENTS_FOUND
+-- - FULL_NAME:     Will inherit comment from FIRST_NAME due to GET_LINEAGE limitation with concatenated strings.
 -- - LAST_NAME:     No comment (never commented) -> NO_COMMENT_FOUND
 -- - STATUS:        Comment from L1
 -- The ID column is ignored because it already has a comment in the target table.
