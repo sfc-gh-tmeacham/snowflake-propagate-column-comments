@@ -134,9 +134,9 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
                 ).distinct()
                 comments_df = info_schema_cols.join(
                     relevant_cols_for_db,
-                    (upper(info_schema_cols.table_schema) == upper(relevant_cols_for_db.TARGET_OBJECT_SCHEMA)) &
-                    (upper(info_schema_cols.table_name) == upper(relevant_cols_for_db.TARGET_OBJECT_NAME)) &
-                    (upper(info_schema_cols.column_name) == upper(relevant_cols_for_db.TARGET_COLUMN_NAME))
+                    (upper(info_schema_cols.col("TABLE_SCHEMA")) == upper(relevant_cols_for_db.col("TARGET_OBJECT_SCHEMA"))) &
+                    (upper(info_schema_cols.col("TABLE_NAME")) == upper(relevant_cols_for_db.col("TARGET_OBJECT_NAME"))) &
+                    (upper(info_schema_cols.col("COLUMN_NAME")) == upper(relevant_cols_for_db.col("TARGET_COLUMN_NAME")))
                 ).filter(col("comment").is_not_null() & (col("comment") != '')).select(
                     "table_catalog", "table_schema", "table_name", "column_name", "comment"
                 )
