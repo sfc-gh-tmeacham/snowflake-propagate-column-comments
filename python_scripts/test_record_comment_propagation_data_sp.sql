@@ -42,6 +42,8 @@ CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_L1) (
     EMAIL VARCHAR, -- No comment here, will be added downstream.
     STATUS VARCHAR COMMENT 'L1 Comment: The status from the source.'
 );
+INSERT INTO IDENTIFIER($FQN_TABLE_L1) (ID) VALUES (1);
+
 
 -- Level 2: A downstream table that adds a new column and comments on an existing one.
 CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_L2)
@@ -83,11 +85,37 @@ CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_L2_ALT) (
     EXTRA_ID INT,
     EXTRA_DATA VARCHAR COMMENT 'L2_ALT Comment: Extra data from an alternate source.'
 );
+INSERT INTO IDENTIFIER($FQN_TABLE_L2_ALT) (EXTRA_ID) VALUES (1);
 SET FQN_COLUMN_L2_ALT_EXTRA_ID = $FQN_TABLE_L2_ALT || '.EXTRA_ID';
 COMMENT ON COLUMN IDENTIFIER($FQN_COLUMN_L2_ALT_EXTRA_ID) IS 'L2_ALT Comment: ID from an alternate source.';
 
+-- *********************************************************************************************************************
+-- Create a UNION lineage to test multiple comments at the same distance.
+-- *********************************************************************************************************************
+SET FQN_UNION_SOURCE_1 = $FQN_SCHEMA_2 || '.UNION_SOURCE_1';
+CREATE OR REPLACE TABLE IDENTIFIER($FQN_UNION_SOURCE_1) (
+    SHARED_ID INT,
+    DATA_TO_UNION VARCHAR COMMENT 'Comment from Union Source 1'
+);
+INSERT INTO IDENTIFIER($FQN_UNION_SOURCE_1) (SHARED_ID) VALUES (1);
 
--- Level 4 (View): A view that joins the main lineage with the alternate branch.
+
+SET FQN_UNION_SOURCE_2 = $FQN_SCHEMA_2 || '.UNION_SOURCE_2';
+CREATE OR REPLACE TABLE IDENTIFIER($FQN_UNION_SOURCE_2) (
+    SHARED_ID INT,
+    DATA_TO_UNION VARCHAR COMMENT 'Comment from Union Source 2'
+);
+INSERT INTO IDENTIFIER($FQN_UNION_SOURCE_2) (SHARED_ID) VALUES (1);
+
+
+SET FQN_UNION_VIEW = $FQN_SCHEMA_1 || '.UNION_VIEW';
+CREATE OR REPLACE VIEW IDENTIFIER($FQN_UNION_VIEW) AS
+    SELECT SHARED_ID, DATA_TO_UNION FROM IDENTIFIER($FQN_UNION_SOURCE_1)
+    UNION ALL
+    SELECT SHARED_ID, DATA_TO_UNION FROM IDENTIFIER($FQN_UNION_SOURCE_2);
+
+
+-- Level 4 (View): A view that joins the main lineage with the alternate branch and the union branch.
 SET FQN_VIEW_L4 = $FQN_SCHEMA_1 || '.LEVEL_4_VIEW';
 CREATE OR REPLACE VIEW IDENTIFIER($FQN_VIEW_L4)
 AS
@@ -98,12 +126,13 @@ SELECT
     l3.STATUS,
     l3.ADDRESS,
     alt.EXTRA_DATA,
-    alt.EXTRA_ID
+    alt.EXTRA_ID,
+    uv.DATA_TO_UNION
 FROM IDENTIFIER($FQN_TABLE_L3) l3
-JOIN IDENTIFIER($FQN_TABLE_L2_ALT) alt ON l3.ID = alt.EXTRA_ID; -- Join on ID
+JOIN IDENTIFIER($FQN_TABLE_L2_ALT) alt ON l3.ID = alt.EXTRA_ID
+JOIN IDENTIFIER($FQN_UNION_VIEW) uv ON l3.ID = uv.SHARED_ID;
 
 -- Final Target Table: The table we want to document.
--- All columns except FULL_NAME should be able to find a comment upstream.
 CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_TARGET)
 AS SELECT * FROM IDENTIFIER($FQN_VIEW_L4);
 
@@ -364,16 +393,16 @@ CALL IDENTIFIER($FQN_PROCEDURE)($TEST_DB_NAME_1, $SCHEMA_NAME_1, 'TARGET_TABLE')
 -- *********************************************************************************************************************
 
 -- Query the staging table to see if the comments were found correctly.
--- We expect the procedure to find comments for all uncommented columns except FULL_NAME.
--- - ADDRESS:       Comment from L2
--- - EMAIL:         Comment from L3 (closest)
--- - EXTRA_DATA:    Comment from L2_ALT
--- - EXTRA_ID:      Comment from L2_ALT
--- - FIRST_NAME:    Comment from L2
--- - FULL_NAME:     Will inherit comment from FIRST_NAME due to GET_LINEAGE limitation with concatenated strings.
--- - LAST_NAME:     No comment (never commented) -> NO_COMMENT_FOUND
--- - STATUS:        Comment from L1
--- The ID column is ignored because it already has a comment in the target table.
+-- - ADDRESS:               Comment from L2
+-- - DATA_TO_UNION:         Two comments at same distance -> MULTIPLE_COMMENTS_AT_SAME_DISTANCE
+-- - EMAIL:                 Comment from L3 (closest)
+-- - EXTRA_DATA:            Comment from L2_ALT
+-- - EXTRA_ID:              Comment from L2_ALT
+-- - FIRST_NAME:            Comment from L2
+-- - FULL_NAME:             Will inherit comment from FIRST_NAME due to GET_LINEAGE limitation with concatenated strings.
+-- - LAST_NAME:             No comment (never commented) -> NO_COMMENT_FOUND
+-- - STATUS:                Comment from L1
+-- - ID column is ignored because it already has a comment in the target table.
 SELECT
     SOURCE_COLUMN_NAME,
     TARGET_COMMENT,
