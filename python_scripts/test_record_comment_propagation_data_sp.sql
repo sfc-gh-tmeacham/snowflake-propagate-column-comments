@@ -31,35 +31,85 @@ CREATE OR REPLACE SCHEMA IDENTIFIER($FQN_SCHEMA_1);
 CREATE OR REPLACE SCHEMA IDENTIFIER($FQN_SCHEMA_2);
 
 -- *********************************************************************************************************************
--- 1. SETUP: Create a four-level deep, cross-database table lineage using fully qualified names.
+-- 1. SETUP: Create a multi-level, cross-database table lineage with comments distributed throughout.
 -- *********************************************************************************************************************
 
--- Level 1: The original source table with well-commented columns.
+-- Level 1: The original source table with some commented and some uncommented columns.
 CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_L1) (
-    ID INT COMMENT 'This is the unique identifier.',
-    FIRST_NAME VARCHAR COMMENT 'The first name of the person.',
-    LAST_NAME VARCHAR COMMENT 'The last name of the person.',
-    EMAIL VARCHAR COMMENT 'The email address.'
+    ID INT COMMENT 'L1 Comment: The unique identifier.',
+    FIRST_NAME VARCHAR, -- No comment here, will be added downstream.
+    LAST_NAME VARCHAR, -- No comment here, will be added downstream.
+    EMAIL VARCHAR, -- No comment here, will be added downstream.
+    STATUS VARCHAR COMMENT 'L1 Comment: The status from the source.'
 );
 
--- Level 2: A downstream table in the same database.
-CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_L2) 
+-- Level 2: A downstream table that adds a new column and comments on an existing one.
+CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_L2)
 AS SELECT * FROM IDENTIFIER($FQN_TABLE_L1);
 
--- Level 3: Another downstream table in a different database with a concatenated column.
-CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_L3) 
-AS 
-SELECT 
-    ID, 
+-- Add a new column with a comment at this level.
+ALTER TABLE IDENTIFIER($FQN_TABLE_L2) ADD COLUMN ADDRESS VARCHAR COMMENT 'L2 Comment: The address, added at Level 2.';
+-- Add a comment to a column that was previously uncommented.
+SET FQN_COLUMN_L2_FIRST_NAME = $FQN_TABLE_L2 || '.FIRST_NAME';
+COMMENT ON COLUMN IDENTIFIER($FQN_COLUMN_L2_FIRST_NAME) IS 'L2 Comment: The first name of the person.';
+
+
+-- Level 3: Another downstream table in a different database that adds a concatenated column and another comment.
+CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_L3)
+AS
+SELECT
+    ID,
     FIRST_NAME,
     LAST_NAME,
-    FIRST_NAME || ' ' || LAST_NAME AS FULL_NAME,
-    EMAIL
+    EMAIL,
+    FIRST_NAME || ' ' || LAST_NAME AS FULL_NAME, -- This column's lineage is untraceable.
+    STATUS,
+    ADDRESS
 FROM IDENTIFIER($FQN_TABLE_L2);
 
--- Level 4 (Target Table): The final table, which has no comments.
-CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_TARGET) 
-AS SELECT ID, FULL_NAME, EMAIL FROM IDENTIFIER($FQN_TABLE_L3);
+-- Add a comment to another previously uncommented column.
+SET FQN_COLUMN_L3_EMAIL = $FQN_TABLE_L3 || '.EMAIL';
+COMMENT ON COLUMN IDENTIFIER($FQN_COLUMN_L3_EMAIL) IS 'L3 Comment: The email address, added at Level 3.';
+
+-- This creates a test case where the closest comment should be chosen.
+-- Let's add a conflicting comment further up the lineage to ensure the procedure picks the L3 comment.
+SET FQN_COLUMN_L1_EMAIL = $FQN_TABLE_L1 || '.EMAIL';
+COMMENT ON COLUMN IDENTIFIER($FQN_COLUMN_L1_EMAIL) IS 'L1 Comment: This is an older email comment that should NOT be selected.';
+
+
+-- Create a separate lineage branch to test joins.
+SET FQN_TABLE_L2_ALT = $FQN_SCHEMA_2 || '.LEVEL_2_ALT';
+CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_L2_ALT) (
+    EXTRA_ID INT,
+    EXTRA_DATA VARCHAR COMMENT 'L2_ALT Comment: Extra data from an alternate source.'
+);
+SET FQN_COLUMN_L2_ALT_EXTRA_ID = $FQN_TABLE_L2_ALT || '.EXTRA_ID';
+COMMENT ON COLUMN IDENTIFIER($FQN_COLUMN_L2_ALT_EXTRA_ID) IS 'L2_ALT Comment: ID from an alternate source.';
+
+
+-- Level 4 (View): A view that joins the main lineage with the alternate branch.
+SET FQN_VIEW_L4 = $FQN_SCHEMA_1 || '.LEVEL_4_VIEW';
+CREATE OR REPLACE VIEW IDENTIFIER($FQN_VIEW_L4)
+AS
+SELECT
+    l3.ID,
+    l3.FULL_NAME,
+    l3.EMAIL,
+    l3.STATUS,
+    l3.ADDRESS,
+    alt.EXTRA_DATA,
+    alt.EXTRA_ID
+FROM IDENTIFIER($FQN_TABLE_L3) l3
+JOIN IDENTIFIER($FQN_TABLE_L2_ALT) alt ON l3.ID = alt.EXTRA_ID; -- Join on ID
+
+-- Final Target Table: The table we want to document.
+-- All columns except FULL_NAME should be able to find a comment upstream.
+CREATE OR REPLACE TABLE IDENTIFIER($FQN_TABLE_TARGET)
+AS SELECT * FROM IDENTIFIER($FQN_VIEW_L4);
+
+-- Add a comment on one column in the target table itself to ensure it is ignored by the procedure.
+SET FQN_COLUMN_TARGET_ID = $FQN_TABLE_TARGET || '.ID';
+COMMENT ON COLUMN IDENTIFIER($FQN_COLUMN_TARGET_ID) IS 'This ID already has a comment and should be ignored.';
 
 -- *********************************************************************************************************************
 -- 2. SETUP: Create the staging table where results will be stored.
@@ -96,7 +146,7 @@ CREATE OR REPLACE PROCEDURE IDENTIFIER($FQN_PROCEDURE)(P_DATABASE_NAME VARCHAR, 
 AS
 $$
 import snowflake.snowpark as snowpark
-from snowflake.snowpark.functions import col, lit, concat, when, row_number, count, replace, regexp_replace, current_timestamp
+from snowflake.snowpark.functions import col, lit, concat, when, row_number, count, replace, regexp_replace, current_timestamp, min
 from snowflake.snowpark.types import StringType, StructType, StructField, IntegerType, TimestampType
 from snowflake.snowpark.window import Window
 import logging
@@ -135,7 +185,6 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
         telemetry.add_event('Procedure Started', {'target_table_fqn': f'{database_name}.{schema_name}.{table_name}', 'run_id': run_id})
 
         # This helper function safely quotes an identifier by handling existing quotes.
-        # It first removes any surrounding quotes and then replaces any internal quotes with double quotes.
         def safe_quote(c: col):
             return concat(lit('"'), replace(regexp_replace(c, '^"|"$', ''), lit('"'), lit('""')), lit('"'))
 
@@ -153,20 +202,18 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
             col("TABLE_SCHEMA").alias("source_schema_name"),
             col("TABLE_NAME").alias("source_table_name"),
             col("COLUMN_NAME").alias("source_column_name"),
-            # Construct the fully qualified name (FQN) for each column.
             concat(
                 safe_quote(col("TABLE_CATALOG")), lit('.'),
                 safe_quote(col("TABLE_SCHEMA")), lit('.'),
                 safe_quote(col("TABLE_NAME")), lit('.'),
                 safe_quote(col("COLUMN_NAME"))
             ).alias("source_column_fqn")
-        ).cache_result()  # Cache the result as it's used multiple times.
+        ).cache_result()
         
         uncommented_column_count = uncommented_columns_df.count()
         telemetry.add_event('Step 1: Find uncommented columns - Finished', {'uncommented_column_count': uncommented_column_count})
 
-        # Step 2 & 3: For each uncommented column, trace its lineage upstream.
-        # GET_LINEAGE requires a literal string for the object name, so we must loop through each column.
+        # Step 2 & 3: Discover lineage for each uncommented column.
         telemetry.add_event('Step 2: Discover lineage - Started')
         
         uncommented_columns_list = uncommented_columns_df.select("source_column_fqn").collect()
@@ -174,8 +221,6 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
         lineage_dfs = []
         for row in uncommented_columns_list:
             column_fqn = row["SOURCE_COLUMN_FQN"]
-            
-            # Call the GET_LINEAGE table function for the current column.
             lineage_df = session.table_function("SNOWFLAKE.CORE.GET_LINEAGE", lit(column_fqn), lit('COLUMN'), lit('UPSTREAM')).select(
                 lit(column_fqn).alias("source_column_fqn"),
                 col("SOURCE_OBJECT_DATABASE").alias("TARGET_OBJECT_DATABASE"),
@@ -186,7 +231,6 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
             )
             lineage_dfs.append(lineage_df)
 
-        # Union all the individual lineage DataFrames into a single DataFrame.
         if not lineage_dfs:
             lineage_schema = StructType([
                 StructField("source_column_fqn", StringType()),
@@ -203,6 +247,16 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
         lineage_path_count = temp_lineage_df.count()
         telemetry.add_event('Step 2: Discover lineage - Finished', {'lineage_path_count': lineage_path_count})
 
+        # Accurately count parents at the closest distance before considering comments.
+        closest_distance_df = temp_lineage_df.groupBy("source_column_fqn").agg(min("DISTANCE").alias("min_distance"))
+        
+        parent_count_df = temp_lineage_df.join(
+            closest_distance_df,
+            "source_column_fqn"
+        ).filter(
+            col("DISTANCE") == col("min_distance")
+        ).groupBy("source_column_fqn").agg(count("*").alias("parents_at_closest_distance"))
+
         # Step 4 & 5: Gather comments from all unique upstream databases and tables.
         telemetry.add_event('Step 5: Gather comments - Started')
 
@@ -211,19 +265,15 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
         comment_dfs = []
         for row in upstream_dbs:
             db_name = row['TARGET_OBJECT_DATABASE']
-            telemetry.add_event('Gathering comments from database', {'database_name': db_name})
-            
-            # For each upstream database, find the comments for the specific columns identified in the lineage.
             info_schema_cols = session.read.table(f'"{db_name}".INFORMATION_SCHEMA.COLUMNS')
             relevant_cols_for_db = temp_lineage_df.filter(col("TARGET_OBJECT_DATABASE") == db_name).select(
                 col("TARGET_OBJECT_SCHEMA"), col("TARGET_OBJECT_NAME"), col("TARGET_COLUMN_NAME")
             ).distinct()
-
             comments_df = info_schema_cols.join(
                 relevant_cols_for_db,
-                (info_schema_cols.col("table_schema") == relevant_cols_for_db.col("TARGET_OBJECT_SCHEMA")) &
-                (info_schema_cols.col("table_name") == relevant_cols_for_db.col("TARGET_OBJECT_NAME")) &
-                (info_schema_cols.col("column_name") == relevant_cols_for_db.col("TARGET_COLUMN_NAME"))
+                (info_schema_cols.table_schema == relevant_cols_for_db.TARGET_OBJECT_SCHEMA) &
+                (info_schema_cols.table_name == relevant_cols_for_db.TARGET_OBJECT_NAME) &
+                (info_schema_cols.column_name == relevant_cols_for_db.TARGET_COLUMN_NAME)
             ).filter(col("comment").is_not_null() & (col("comment") != '')).select(
                 "table_catalog", "table_schema", "table_name", "column_name", "comment"
             )
@@ -237,25 +287,24 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
         total_comments_found = all_upstream_comments_df.count()
         telemetry.add_event('Step 5: Gather comments - Finished', {'total_comments_found': total_comments_found})
 
-
         # Step 6: Join lineage with comments and apply ranking logic to find the best comment.
         telemetry.add_event('Step 6: Stage results - Started')
         
         lineage_with_comments = temp_lineage_df.join(
             all_upstream_comments_df,
-            (temp_lineage_df.col("TARGET_OBJECT_DATABASE") == all_upstream_comments_df.col("table_catalog")) &
-            (temp_lineage_df.col("TARGET_OBJECT_SCHEMA") == all_upstream_comments_df.col("table_schema")) &
-            (temp_lineage_df.col("TARGET_OBJECT_NAME") == all_upstream_comments_df.col("table_name")) &
-            (temp_lineage_df.col("TARGET_COLUMN_NAME") == all_upstream_comments_df.col("column_name")),
+            (temp_lineage_df.TARGET_OBJECT_DATABASE == all_upstream_comments_df.table_catalog) &
+            (temp_lineage_df.TARGET_OBJECT_SCHEMA == all_upstream_comments_df.table_schema) &
+            (temp_lineage_df.TARGET_OBJECT_NAME == all_upstream_comments_df.table_name) &
+            (temp_lineage_df.TARGET_COLUMN_NAME == all_upstream_comments_df.column_name),
             "left"
         ).select(
-            temp_lineage_df.col("source_column_fqn"),
-            all_upstream_comments_df.col("table_catalog").alias("target_database_name"),
-            all_upstream_comments_df.col("table_schema").alias("target_schema_name"),
-            all_upstream_comments_df.col("table_name").alias("target_table_name"),
-            all_upstream_comments_df.col("column_name").alias("target_column_name"),
-            all_upstream_comments_df.col("comment").alias("target_comment"),
-            temp_lineage_df.col("DISTANCE").alias("lineage_distance")
+            temp_lineage_df.source_column_fqn,
+            all_upstream_comments_df.table_catalog.alias("target_database_name"),
+            all_upstream_comments_df.table_schema.alias("target_schema_name"),
+            all_upstream_comments_df.table_name.alias("target_table_name"),
+            all_upstream_comments_df.column_name.alias("target_column_name"),
+            all_upstream_comments_df.comment.alias("target_comment"),
+            temp_lineage_df.DISTANCE.alias("lineage_distance")
         ).withColumn(
              "target_column_fqn",
              concat(
@@ -266,7 +315,6 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
             )
         )
 
-        # Rank comments by lineage distance. The closest comment (smallest distance) is preferred.
         window = Window.partitionBy("source_column_fqn").orderBy("lineage_distance")
         ranked_lineage = lineage_with_comments.filter(
             col("target_comment").is_not_null() & (col("target_comment") != '')
@@ -276,41 +324,29 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
             "comments_at_this_distance", count(lit(1)).over(Window.partitionBy("source_column_fqn", "lineage_distance"))
         )
 
-        # Determine the final status for each column: found, not found, or multiple options.
         comment_propagation_logic = uncommented_columns_df.join(
-            ranked_lineage.filter(col("rn") == 1),
-            "source_column_fqn",
-            "left"
+            ranked_lineage.filter(col("rn") == 1), "source_column_fqn", "left"
+        ).join(
+            parent_count_df, "source_column_fqn", "left"
         ).withColumn(
             "status",
             when(col("target_comment").is_null(), lit("NO_COMMENT_FOUND"))
+            .when(col("parents_at_closest_distance") > 1, lit("MULTIPLE_PARENTS_FOUND"))
             .when(col("comments_at_this_distance") > 1, lit("MULTIPLE_COMMENTS_AT_SAME_DISTANCE"))
             .otherwise(lit("COMMENT_FOUND"))
         )
 
         final_results_df = comment_propagation_logic.select(
             lit(run_id).alias("RUN_ID"),
-            "source_database_name",
-            "source_schema_name",
-            "source_table_name",
-            "source_column_name",
-            "source_column_fqn",
-            "target_database_name",
-            "target_schema_name",
-            "target_table_name",
-            "target_column_name",
-            "target_column_fqn",
-            "target_comment",
-            "lineage_distance",
-            "status",
+            "source_database_name", "source_schema_name", "source_table_name", "source_column_name", "source_column_fqn",
+            "target_database_name", "target_schema_name", "target_table_name", "target_column_name", "target_column_fqn",
+            when(col("status") == "MULTIPLE_PARENTS_FOUND", lit(None).cast(StringType())).otherwise(col("target_comment")).alias("target_comment"),
+            "lineage_distance", "status",
             current_timestamp().alias("RECORD_TIMESTAMP"),
             lit(None).cast(StringType()).alias("APPLICATION_STATUS"),
             lit(None).cast(TimestampType()).alias("APPLICATION_TIMESTAMP")
         )
 
-        # Write the final results to the staging table.
-        # The staging table name is unqualified because a procedure running with owner's rights
-        # resolves unqualified objects against the procedure's own schema.
         final_results_df.write.mode("append").save_as_table(table_name="COMMENT_PROPAGATION_STAGING")
         rows_inserted = final_results_df.count()
 
@@ -339,11 +375,20 @@ CALL IDENTIFIER($FQN_PROCEDURE)($TEST_DB_NAME_1, $SCHEMA_NAME_1, 'TARGET_TABLE')
 -- *********************************************************************************************************************
 
 -- Query the staging table to see if the comments were found correctly.
--- We expect to see 3 rows for ID, FULL_NAME, and EMAIL.
--- The comment for FULL_NAME should be null, as lineage is not tracked for concatenated columns.
+-- We expect the procedure to find comments for all uncommented columns except FULL_NAME.
+-- - ADDRESS:       Comment from L2
+-- - EMAIL:         Comment from L3 (closest)
+-- - EXTRA_DATA:    Comment from L2_ALT
+-- - EXTRA_ID:      Comment from L2_ALT
+-- - FIRST_NAME:    Comment from L2
+-- - FULL_NAME:     No comment (derived column with multiple parents) -> MULTIPLE_PARENTS_FOUND
+-- - LAST_NAME:     No comment (never commented) -> NO_COMMENT_FOUND
+-- - STATUS:        Comment from L1
+-- The ID column is ignored because it already has a comment in the target table.
 SELECT
     SOURCE_COLUMN_NAME,
     TARGET_COMMENT,
+    TARGET_COLUMN_FQN,
     LINEAGE_DISTANCE,
     STATUS
 FROM IDENTIFIER($FQN_STAGING_TABLE)
