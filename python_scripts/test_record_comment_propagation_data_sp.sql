@@ -146,7 +146,7 @@ CREATE OR REPLACE PROCEDURE IDENTIFIER($FQN_PROCEDURE)(P_DATABASE_NAME VARCHAR, 
 AS
 $$
 import snowflake.snowpark as snowpark
-from snowflake.snowpark.functions import col, lit, concat, when, row_number, count, replace, regexp_replace, current_timestamp, min
+from snowflake.snowpark.functions import col, lit, concat, when, row_number, count, replace, regexp_replace, current_timestamp, min, upper
 from snowflake.snowpark.types import StringType, StructType, StructField, IntegerType, TimestampType
 from snowflake.snowpark.window import Window
 import logging
@@ -191,11 +191,11 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
         # Step 1: Find all columns in the target table that do not have a comment.
         telemetry.add_event('Step 1: Find uncommented columns - Started')
         
-        columns_df = session.read.table(f'"{database_name}".INFORMATION_SCHEMA.COLUMNS')
+        columns_df = session.read.table(f'{database_name}.INFORMATION_SCHEMA.COLUMNS')
         
         uncommented_columns_df = columns_df.filter(
-            (col("TABLE_SCHEMA") == schema_name) &
-            (col("TABLE_NAME") == table_name) &
+            (upper(col("TABLE_SCHEMA")) == schema_name.upper()) &
+            (upper(col("TABLE_NAME")) == table_name.upper()) &
             ((col("COMMENT").is_null()) | (col("COMMENT") == ''))
         ).select(
             col("TABLE_CATALOG").alias("source_database_name"),
@@ -219,17 +219,18 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
         uncommented_columns_list = uncommented_columns_df.select("source_column_fqn").collect()
         
         lineage_dfs = []
-        for row in uncommented_columns_list:
-            column_fqn = row["SOURCE_COLUMN_FQN"]
-            lineage_df = session.table_function("SNOWFLAKE.CORE.GET_LINEAGE", lit(column_fqn), lit('COLUMN'), lit('UPSTREAM')).select(
-                lit(column_fqn).alias("source_column_fqn"),
-                col("SOURCE_OBJECT_DATABASE").alias("TARGET_OBJECT_DATABASE"),
-                col("SOURCE_OBJECT_SCHEMA").alias("TARGET_OBJECT_SCHEMA"),
-                col("SOURCE_OBJECT_NAME").alias("TARGET_OBJECT_NAME"),
-                col("SOURCE_COLUMN_NAME").alias("TARGET_COLUMN_NAME"),
-                col("DISTANCE")
-            )
-            lineage_dfs.append(lineage_df)
+        if uncommented_columns_list:
+            for row in uncommented_columns_list:
+                column_fqn = row["SOURCE_COLUMN_FQN"]
+                lineage_df = session.table_function("SNOWFLAKE.CORE.GET_LINEAGE", lit(column_fqn), lit('COLUMN'), lit('UPSTREAM')).select(
+                    lit(column_fqn).alias("source_column_fqn"),
+                    col("SOURCE_OBJECT_DATABASE").alias("TARGET_OBJECT_DATABASE"),
+                    col("SOURCE_OBJECT_SCHEMA").alias("TARGET_OBJECT_SCHEMA"),
+                    col("SOURCE_OBJECT_NAME").alias("TARGET_OBJECT_NAME"),
+                    col("SOURCE_COLUMN_NAME").alias("TARGET_COLUMN_NAME"),
+                    col("DISTANCE")
+                )
+                lineage_dfs.append(lineage_df)
 
         if not lineage_dfs:
             lineage_schema = StructType([
@@ -263,21 +264,22 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
         upstream_dbs = temp_lineage_df.select("TARGET_OBJECT_DATABASE").distinct().filter(col("TARGET_OBJECT_DATABASE").is_not_null()).collect()
         
         comment_dfs = []
-        for row in upstream_dbs:
-            db_name = row['TARGET_OBJECT_DATABASE']
-            info_schema_cols = session.read.table(f'"{db_name}".INFORMATION_SCHEMA.COLUMNS')
-            relevant_cols_for_db = temp_lineage_df.filter(col("TARGET_OBJECT_DATABASE") == db_name).select(
-                col("TARGET_OBJECT_SCHEMA"), col("TARGET_OBJECT_NAME"), col("TARGET_COLUMN_NAME")
-            ).distinct()
-            comments_df = info_schema_cols.join(
-                relevant_cols_for_db,
-                (info_schema_cols.table_schema == relevant_cols_for_db.TARGET_OBJECT_SCHEMA) &
-                (info_schema_cols.table_name == relevant_cols_for_db.TARGET_OBJECT_NAME) &
-                (info_schema_cols.column_name == relevant_cols_for_db.TARGET_COLUMN_NAME)
-            ).filter(col("comment").is_not_null() & (col("comment") != '')).select(
-                "table_catalog", "table_schema", "table_name", "column_name", "comment"
-            )
-            comment_dfs.append(comments_df)
+        if upstream_dbs:
+            for row in upstream_dbs:
+                db_name = row['TARGET_OBJECT_DATABASE']
+                info_schema_cols = session.read.table(f'{db_name}.INFORMATION_SCHEMA.COLUMNS')
+                relevant_cols_for_db = temp_lineage_df.filter(upper(col("TARGET_OBJECT_DATABASE")) == db_name.upper()).select(
+                    col("TARGET_OBJECT_SCHEMA"), col("TARGET_OBJECT_NAME"), col("TARGET_COLUMN_NAME")
+                ).distinct()
+                comments_df = info_schema_cols.join(
+                    relevant_cols_for_db,
+                    (upper(info_schema_cols.table_schema) == upper(relevant_cols_for_db.TARGET_OBJECT_SCHEMA)) &
+                    (upper(info_schema_cols.table_name) == upper(relevant_cols_for_db.TARGET_OBJECT_NAME)) &
+                    (upper(info_schema_cols.column_name) == upper(relevant_cols_for_db.TARGET_COLUMN_NAME))
+                ).filter(col("comment").is_not_null() & (col("comment") != '')).select(
+                    "table_catalog", "table_schema", "table_name", "column_name", "comment"
+                )
+                comment_dfs.append(comments_df)
 
         if not comment_dfs:
             all_upstream_comments_df = session.create_dataframe([], schema=StructType([StructField("table_catalog", StringType()), StructField("table_schema", StringType()), StructField("table_name", StringType()), StructField("column_name", StringType()), StructField("comment", StringType())]))
@@ -292,19 +294,19 @@ def record_comment_propagation_data(session: snowpark.Session, database_name: st
         
         lineage_with_comments = temp_lineage_df.join(
             all_upstream_comments_df,
-            (temp_lineage_df.TARGET_OBJECT_DATABASE == all_upstream_comments_df.table_catalog) &
-            (temp_lineage_df.TARGET_OBJECT_SCHEMA == all_upstream_comments_df.table_schema) &
-            (temp_lineage_df.TARGET_OBJECT_NAME == all_upstream_comments_df.table_name) &
-            (temp_lineage_df.TARGET_COLUMN_NAME == all_upstream_comments_df.column_name),
+            (upper(temp_lineage_df.TARGET_OBJECT_DATABASE) == upper(all_upstream_comments_df.table_catalog)) &
+            (upper(temp_lineage_df.TARGET_OBJECT_SCHEMA) == upper(all_upstream_comments_df.table_schema)) &
+            (upper(temp_lineage_df.TARGET_OBJECT_NAME) == upper(all_upstream_comments_df.table_name)) &
+            (upper(temp_lineage_df.TARGET_COLUMN_NAME) == upper(all_upstream_comments_df.column_name)),
             "left"
         ).select(
-            temp_lineage_df.source_column_fqn,
-            all_upstream_comments_df.table_catalog.alias("target_database_name"),
-            all_upstream_comments_df.table_schema.alias("target_schema_name"),
-            all_upstream_comments_df.table_name.alias("target_table_name"),
-            all_upstream_comments_df.column_name.alias("target_column_name"),
-            all_upstream_comments_df.comment.alias("target_comment"),
-            temp_lineage_df.DISTANCE.alias("lineage_distance")
+            col("source_column_fqn"),
+            col("table_catalog").alias("target_database_name"),
+            col("table_schema").alias("target_schema_name"),
+            col("table_name").alias("target_table_name"),
+            col("column_name").alias("target_column_name"),
+            col("comment").alias("target_comment"),
+            col("DISTANCE").alias("lineage_distance")
         ).withColumn(
              "target_column_fqn",
              concat(
