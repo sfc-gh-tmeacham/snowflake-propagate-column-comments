@@ -55,13 +55,13 @@ JOIN PARENT_B b ON a.ID = b.ID;
 -- 2. EXECUTION: Run the comment propagation procedures
 -- *********************************************************************************************************************
 SET DEPLOY_DB = CURRENT_DATABASE();
-SET DEPLOY_SCHEMA = 'PUBLIC';
-SET TEST_DB = CURRENT_DATABASE();
-SET TEST_SCHEMA_NAME = 'TEST_SCHEMA';
+SET DEPLOY_SCHEMA = 'PUBLIC'; -- Assumes procedures are in PUBLIC schema.
 SET RECORD_PROC_FQN = $DEPLOY_DB || '.' || $DEPLOY_SCHEMA || '.RECORD_COMMENT_PROPAGATION_DATA';
 SET APPLY_PROC_FQN = $DEPLOY_DB || '.' || $DEPLOY_SCHEMA || '.APPLY_COMMENT_PROPAGATION_DATA';
 
 -- Call the procedure to find and record comments for FINAL_TABLE.
+SET TEST_DB = CURRENT_DATABASE();
+SET TEST_SCHEMA_NAME = 'TEST_SCHEMA';
 SET record_call_stmt = 'CALL ' || $RECORD_PROC_FQN || ' (''' || $TEST_DB || ''', ''' || $TEST_SCHEMA_NAME || ''', ''FINAL_TABLE'')';
 EXECUTE IMMEDIATE $record_call_stmt;
 

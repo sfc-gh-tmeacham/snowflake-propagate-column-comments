@@ -383,9 +383,8 @@ BEGIN
 
     v_table_fqn := SAFE_QUOTE(v_source_database_name) || '.' || SAFE_QUOTE(v_source_schema_name) || '.' || SAFE_QUOTE(v_source_table_name);
     
-    -- Dynamically construct a single ALTER TABLE statement that updates all column comments for the table in one operation.
+    -- Dynamically construct the MODIFY clause for the ALTER TABLE statement.
     SELECT
-      'ALTER TABLE ' || :v_table_fqn || ' MODIFY ' ||
       LISTAGG(
           CONCAT('COLUMN ', SAFE_QUOTE(SOURCE_COLUMN_NAME), ' COMMENT ''', REPLACE(TARGET_COMMENT, '''', ''''''), ''''),
           ', '
@@ -397,11 +396,10 @@ BEGIN
       AND STATUS = 'COMMENT_FOUND'
       AND APPLICATION_STATUS IS NULL;
 
-    -- Execute the dynamic DDL. By wrapping this in its own BEGIN/EXCEPTION block,
-    -- we ensure that a failure does not halt the entire procedure.
+    -- Execute the dynamic DDL using the IDENTIFIER() function for the table name.
     BEGIN
-        SYSTEM$LOG_INFO('Executing: ' || alter_sql);
-        EXECUTE IMMEDIATE alter_sql;
+        SYSTEM$LOG_INFO('Applying comments to table ' || v_table_fqn);
+        EXECUTE IMMEDIATE 'ALTER TABLE IDENTIFIER(:v_table_fqn) MODIFY ' || alter_sql;
         
         UPDATE COMMENT_PROPAGATION_STAGING
         SET APPLICATION_STATUS = 'APPLIED', APPLICATION_TIMESTAMP = :v_application_timestamp
@@ -444,3 +442,6 @@ EXCEPTION
         RETURN err_msg;
 END;
 $$;
+
+-- Enable automatic tracing for the apply procedure as well.
+ALTER PROCEDURE APPLY_COMMENT_PROPAGATION_DATA(VARCHAR) SET AUTO_EVENT_LOGGING = 'TRACING';
