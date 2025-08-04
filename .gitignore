@@ -1,13 +1,19 @@
 # Environment-specific files
 .cursorrules
 *.code-workspace
+.vscode/
 
 # Build artifacts and temporary files
 checkpoints.json
+*.log
+.env
 
 # Obsolete directories
 sql_version/
 python_version/
+
+# Python cache
+__pycache__/
 
 # OS-specific files
 .DS_Store
