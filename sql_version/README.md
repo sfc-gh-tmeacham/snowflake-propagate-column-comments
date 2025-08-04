@@ -8,8 +8,8 @@ The primary goal is to identify columns in a given table that lack comments and 
 
 The solution is delivered as a single deployment script that creates two stored procedures:
 
-1.  **`RECORD_COMMENT_PROPAGATION_DATA`**: The main procedure that you call to find and record comment suggestions in a staging table.
-2.  **`APPLY_COMMENT_PROPAGATION_DATA`**: A second procedure that you call to apply the suggestions from the staging table.
+1. **`RECORD_COMMENT_PROPAGATION_DATA`**: The main procedure that you call to find and record comment suggestions in a staging table.
+2. **`APPLY_COMMENT_PROPAGATION_DATA`**: A second procedure that you call to apply the suggestions from the staging table.
 
 This two-step process allows you to review the suggested comments before applying them.
 
@@ -17,14 +17,14 @@ This two-step process allows you to review the suggested comments before applyin
 
 The solution uses a single deployment script (`deploy.sql`) to create all the necessary database objects. The core logic is contained within the `RECORD_COMMENT_PROPAGATION_DATA` procedure, which operates as follows:
 
-1.  **Finds Uncommented Columns**: It first identifies all columns in the target table that have `NULL` or empty comments.
-2.  **Discovers Lineage**: Using Snowflake's `GET_LINEAGE` function, it constructs the complete upstream lineage for all uncommented columns. This is done efficiently using a single, dynamic `UNION ALL` query.
-3.  **Gathers All Potential Comments**: It then queries the `INFORMATION_SCHEMA` of all unique upstream databases to collect all available comments for the identified ancestor columns.
-4.  **Determines Final Status**: In a single, multi-CTE query, it determines the final status for each column based on a clear order of precedence:
-    *   **Structural Ambiguity**: It first checks if a column has a "structural fork" in its lineage (i.e., more than one parent at the same, closest distance). If so, it is marked `MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE`.
-    *   **Comment Found**: If the lineage is structurally sound (a single parent at the closest distance), it checks if that parent has a comment. If it does, the status is `COMMENT_FOUND`.
-    *   **No Comment Found**: If the single parent has no comment, or if there is no lineage, the status is `NO_COMMENT_FOUND`.
-5.  **Logs Results**: The final, processed results are inserted into the `COMMENT_PROPAGATION_STAGING` table with a unique `RUN_ID`.
+1. **Finds Uncommented Columns**: It first identifies all columns in the target table that have `NULL` or empty comments.
+2. **Discovers Lineage**: Using Snowflake's `GET_LINEAGE` function, it constructs the complete upstream lineage for all uncommented columns. This is done efficiently using a single, dynamic `UNION ALL` query.
+3. **Gathers All Potential Comments**: It then queries the `INFORMATION_SCHEMA` of all unique upstream databases to collect all available comments for the identified ancestor columns.
+4. **Determines Final Status**: In a single, multi-CTE query, it determines the final status for each column based on a clear order of precedence:
+    * **Structural Ambiguity**: It first checks if a column has a "structural fork" in its lineage (i.e., more than one parent at the same, closest distance). If so, it is marked `MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE`.
+    * **Comment Found**: If the lineage is structurally sound (a single parent at the closest distance), it checks if that parent has a comment. If it does, the status is `COMMENT_FOUND`.
+    * **No Comment Found**: If the single parent has no comment, or if there is no lineage, the status is `NO_COMMENT_FOUND`.
+5. **Logs Results**: The final, processed results are inserted into the `COMMENT_PROPAGATION_STAGING` table with a unique `RUN_ID`.
 
 ## Permissions
 
@@ -56,9 +56,9 @@ After the procedure completes, you can query the `COMMENT_PROPAGATION_STAGING` t
 
 The `STATUS` column will indicate the outcome for each column:
 
-*   `COMMENT_FOUND`: A single, unambiguous comment was found at the closest lineage distance.
-*   `MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE`: The column has a structural fork in its lineage (multiple parents at the same closest distance), making the source ambiguous.
-*   `NO_COMMENT_FOUND`: No comment was found for the column, either because its single parent had no comment or because it had no lineage.
+* `COMMENT_FOUND`: A single, unambiguous comment was found at the closest lineage distance.
+* `MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE`: The column has a structural fork in its lineage (multiple parents at the same closest distance), making the source ambiguous.
+* `NO_COMMENT_FOUND`: No comment was found for the column, either because its single parent had no comment or because it had no lineage.
 
 ```sql
 -- Replace 'your_run_id' with the actual RUN_ID
@@ -78,8 +78,8 @@ CALL APPLY_COMMENT_PROPAGATION_DATA('your_run_id');
 
 The project includes a robust and simplified test suite (`testing/test.sql`) that validates the three core logical outcomes:
 
-*   **`COMMENT_FOUND`**: Tests that a comment is correctly propagated from a single, unambiguous parent.
-*   **`MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE`**: Tests that a column derived from two parents is correctly flagged as ambiguous.
-*   **`NO_COMMENT_FOUND`**: Tests that a column whose parent has no comment is correctly flagged.
+* **`COMMENT_FOUND`**: Tests that a comment is correctly propagated from a single, unambiguous parent.
+* **`MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE`**: Tests that a column derived from two parents is correctly flagged as ambiguous.
+* **`NO_COMMENT_FOUND`**: Tests that a column whose parent has no comment is correctly flagged.
 
 To run the tests, execute `testing/test.sql` after deploying the solution.
