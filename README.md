@@ -127,4 +127,7 @@ For more details, please refer to the official Snowflake documentation on [GET_L
 
 ## Disclaimer
 
-This project is provided as-is and is not officially supported by Snowflake. Use it at your own risk. The author and contributors are not responsible for any issues or damages that may arise from its use. It is highly recommended to test this solution thoroughly in a non-production environment before deploying it in a production setting.
+* **No Warranty**: This project is provided "as-is" and without any warranty, express or implied.
+* **No Official Support**: This is a community-driven project and is **not** officially supported by Snowflake.
+* **Use at Your Own Risk**: You assume all risks associated with this solution. The author and contributors are not responsible for any issues or unexpected outcomes that may arise from its use.
+* **Test Thoroughly**: It is strongly recommended to test this solution in a non-production environment before deploying it to any critical systems.
