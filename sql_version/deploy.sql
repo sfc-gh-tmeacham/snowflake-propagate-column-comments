@@ -50,7 +50,7 @@ CREATE OR REPLACE TABLE COMMENT_PROPAGATION_STAGING (
     TARGET_COLUMN_FQN VARCHAR COMMENT 'The fully qualified name of the target column where a comment was found.',
     TARGET_COMMENT VARCHAR COMMENT 'The comment found on the target column.',
     LINEAGE_DISTANCE INTEGER COMMENT 'The number of steps in the lineage between the source and target objects.',
-    STATUS VARCHAR COMMENT 'The status of the comment propagation for this column. One of COMMENT_FOUND, NO_COMMENT_FOUND, or MULTIPLE_COMMENTS_AT_SAME_DISTANCE.',
+    STATUS VARCHAR COMMENT 'The status of the comment propagation for this column. One of COMMENT_FOUND, NO_COMMENT_FOUND, or MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE.',
     RECORD_TIMESTAMP TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP() COMMENT 'The timestamp when this record was created.',
     APPLICATION_STATUS VARCHAR COMMENT 'The status of the comment application. One of APPLIED or SKIPPED.',
     APPLICATION_TIMESTAMP TIMESTAMP_LTZ COMMENT 'The timestamp when the comment was applied or skipped.'
@@ -231,31 +231,26 @@ BEGIN
         TARGET_COMMENT, LINEAGE_DISTANCE, STATUS
     )
     WITH
-    lineage_with_comments AS (
+    -- First, identify the closest lineage distance for each source column.
+    min_lineage_distance AS (
+        SELECT
+            source_column_fqn,
+            MIN(DISTANCE) as min_distance
+        FROM temp_lineage
+        GROUP BY source_column_fqn
+    ),
+    -- Then, count how many parents exist at that minimum distance.
+    closest_parents AS (
         SELECT
             lin.source_column_fqn,
-            c.table_catalog AS target_database_name,
-            c.table_schema AS target_schema_name,
-            c.table_name AS target_table_name,
-            c.column_name AS target_column_name,
-            SAFE_QUOTE(c.table_catalog) || '.' || SAFE_QUOTE(c.table_schema) || '.' || SAFE_QUOTE(c.table_name) || '.' || SAFE_QUOTE(c.column_name) as target_column_fqn,
-            c.comment AS target_comment,
-            lin.DISTANCE AS lineage_distance
-        FROM temp_lineage lin
-        LEFT JOIN temp_all_upstream_column_comments c
-          ON lin.TARGET_OBJECT_DATABASE = c.table_catalog
-          AND lin.TARGET_OBJECT_SCHEMA = c.table_schema
-          AND lin.TARGET_OBJECT_NAME = c.table_name
-          AND lin.TARGET_COLUMN_NAME = c.column_name
+            lin.min_distance,
+            COUNT(*) as parent_count
+        FROM min_lineage_distance lin
+        JOIN temp_lineage tl
+          ON lin.source_column_fqn = tl.source_column_fqn AND lin.min_distance = tl.DISTANCE
+        GROUP BY lin.source_column_fqn, lin.min_distance
     ),
-    ranked_lineage AS (
-        SELECT
-            *,
-            COUNT(*) OVER (PARTITION BY source_column_fqn, lineage_distance) as comments_at_this_distance,
-            ROW_NUMBER() OVER (PARTITION BY source_column_fqn ORDER BY lineage_distance) as rn
-        FROM lineage_with_comments
-        WHERE target_comment IS NOT NULL AND target_comment <> ''
-    ),
+    -- Finally, join back to get the comment only if there is a single parent.
     COMMENT_PROPAGATION_LOGIC AS (
         SELECT
             uc.source_database_name,
@@ -263,21 +258,28 @@ BEGIN
             uc.source_table_name,
             uc.source_column_name,
             uc.source_column_fqn,
-            rl.target_database_name,
-            rl.target_schema_name,
-            rl.target_table_name,
-            rl.target_column_name,
-            rl.target_column_fqn,
-            rl.target_comment,
-            rl.lineage_distance,
+            c.table_catalog AS target_database_name,
+            c.table_schema AS target_schema_name,
+            c.table_name AS target_table_name,
+            c.column_name AS target_column_name,
+            SAFE_QUOTE(c.table_catalog) || '.' || SAFE_QUOTE(c.table_schema) || '.' || SAFE_QUOTE(c.table_name) || '.' || SAFE_QUOTE(c.column_name) as target_column_fqn,
+            c.comment AS target_comment,
+            cp.min_distance AS lineage_distance,
             CASE
-                WHEN rl.source_column_fqn IS NULL THEN 'NO_COMMENT_FOUND'
-                WHEN rl.comments_at_this_distance > 1 THEN 'MULTIPLE_COMMENTS_AT_SAME_DISTANCE'
-                ELSE 'COMMENT_FOUND'
+                WHEN cp.parent_count > 1 THEN 'MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE'
+                WHEN c.comment IS NOT NULL AND c.comment <> '' THEN 'COMMENT_FOUND'
+                ELSE 'NO_COMMENT_FOUND'
             END as status
         FROM temp_uncommented_columns uc
-        LEFT JOIN ranked_lineage rl
-          ON uc.source_column_fqn = rl.source_column_fqn AND rl.rn = 1
+        LEFT JOIN closest_parents cp
+          ON uc.source_column_fqn = cp.source_column_fqn
+        LEFT JOIN temp_lineage tl
+          ON cp.source_column_fqn = tl.source_column_fqn AND cp.min_distance = tl.DISTANCE AND cp.parent_count = 1
+        LEFT JOIN temp_all_upstream_column_comments c
+          ON tl.TARGET_OBJECT_DATABASE = c.table_catalog
+          AND tl.TARGET_OBJECT_SCHEMA = c.table_schema
+          AND tl.TARGET_OBJECT_NAME = c.table_name
+          AND tl.TARGET_COLUMN_NAME = c.column_name
     )
     SELECT
         :run_id,
