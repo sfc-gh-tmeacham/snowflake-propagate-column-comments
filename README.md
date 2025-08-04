@@ -1,5 +1,7 @@
 # Snowflake Propagate Column Comments
 
+[![Snowflake SQL](https://img.shields.io/badge/Snowflake-SQL-blue?logo=snowflake)](https://www.snowflake.com/)
+
 ## Version 0.5
 
 This project provides a Snowflake stored procedure to automate the propagation of column comments from ancestor tables (i.e., upstream sources) to descendant tables (i.e., downstream targets) using data lineage.
