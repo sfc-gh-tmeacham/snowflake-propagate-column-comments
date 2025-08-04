@@ -1,26 +1,13 @@
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-._*
-.DocumentRevisions-V100
-.fseventsd
-.Spotlight-V100
-.TemporaryItems
-.Trashes
-.VolumeIcon.icns
-.com.apple.timemachine.donotpresent
-
-# VS Code
-.vscode/
+# Environment-specific files
+.cursorrules
 *.code-workspace
 
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+# Build artifacts and temporary files
+checkpoints.json
 
-# Environment variables
-.env
-.env*.local
+# Obsolete directories
+sql_version/
+python_version/
+
+# OS-specific files
+.DS_Store
