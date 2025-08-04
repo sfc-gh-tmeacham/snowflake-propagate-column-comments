@@ -85,10 +85,8 @@ DECLARE
   db_info_schema_fqn VARCHAR;
   tables_view_fqn VARCHAR;
   columns_view_fqn VARCHAR;
-  staging_table_fqn VARCHAR;
 
 BEGIN
-  staging_table_fqn := $DEPLOY_DATABASE || '.' || $DEPLOY_SCHEMA || '.COMMENT_PROPAGATION_STAGING';
 
   IF (P_DATABASE_NAME IS NULL OR P_SCHEMA_NAME IS NULL OR P_TABLE_NAME IS NULL) THEN
     err_msg := 'ERROR in RECORD_COMMENT_PROPAGATION_DATA: Input parameters cannot be NULL.';
@@ -186,7 +184,7 @@ BEGIN
       END IF;
     END;
 
-    INSERT INTO IDENTIFIER(:staging_table_fqn) (
+    INSERT INTO COMMENT_PROPAGATION_STAGING (
         RUN_ID, SOURCE_DATABASE_NAME, SOURCE_SCHEMA_NAME, SOURCE_TABLE_NAME, SOURCE_COLUMN_NAME, SOURCE_COLUMN_FQN,
         TARGET_DATABASE_NAME, TARGET_SCHEMA_NAME, TARGET_TABLE_NAME, TARGET_COLUMN_NAME, TARGET_COLUMN_FQN,
         TARGET_COMMENT, LINEAGE_DISTANCE, STATUS
@@ -229,7 +227,7 @@ BEGIN
     LEFT JOIN single_parent_details spd ON uc.source_column_fqn = spd.source_column_fqn;
 
     rows_inserted := SQLROWCOUNT;
-    SELECT COUNT_IF(STATUS = 'COMMENT_FOUND') INTO :v_count FROM IDENTIFIER(:staging_table_fqn) WHERE RUN_ID = :run_id;
+    SELECT COUNT_IF(STATUS = 'COMMENT_FOUND') INTO :v_count FROM COMMENT_PROPAGATION_STAGING WHERE RUN_ID = :run_id;
     SYSTEM$ADD_EVENT('Step 6: Stage results - Finished', {'rows_inserted': :rows_inserted, 'actionable_comments': :v_count});
 
   EXCEPTION
@@ -242,7 +240,7 @@ BEGIN
 END;
 $$;
 
-ALTER PROCEDURE RECORD_COMMENT_PROPAGATION_DATA(VARCHAR, VARCHAR, VARCHAR) SET AUTO_EVENT_LOGGING = 'TRACING';
+ALTER PROCEDURE RECORD_COMMENT_PROPAGATION_DATA(VARCHAR, VARCHAR, VARCHAR) SET AUTO_EVENT_LOGGING = 'ALL';
 
 CREATE OR REPLACE PROCEDURE APPLY_COMMENT_PROPAGATION_DATA(P_RUN_ID VARCHAR)
   COPY GRANTS
@@ -261,9 +259,12 @@ DECLARE
   v_failed_columns VARCHAR;
   v_application_timestamp TIMESTAMP_LTZ;
   err_msg VARCHAR;
-  staging_table_fqn VARCHAR;
+  v_source_database_name VARCHAR;
+  v_source_schema_name VARCHAR;
+  v_source_table_name VARCHAR;
+  v_comments_to_apply INTEGER;
+
 BEGIN
-  staging_table_fqn := $DEPLOY_DATABASE || '.' || $DEPLOY_SCHEMA || '.COMMENT_PROPAGATION_STAGING';
   v_application_timestamp := CURRENT_TIMESTAMP();
 
   IF (P_RUN_ID IS NULL) THEN
@@ -272,61 +273,62 @@ BEGIN
     RETURN err_msg;
   END IF;
 
-  SELECT COUNT(1) INTO :v_run_id_exists FROM IDENTIFIER(:staging_table_fqn) WHERE RUN_ID = :P_RUN_ID;
+  SYSTEM$SET_SPAN_ATTRIBUTES({'run_id': :P_RUN_ID});
+
+  SELECT COUNT(1) INTO :v_run_id_exists FROM COMMENT_PROPAGATION_STAGING WHERE RUN_ID = :P_RUN_ID;
   IF (v_run_id_exists = 0) THEN
     err_msg := 'ERROR: RUN_ID ' || P_RUN_ID || ' not found in staging table.';
     SYSTEM$LOG_FATAL(err_msg);
     RETURN err_msg;
   END IF;
 
-  DECLARE
-    v_source_database_name VARCHAR;
-    v_source_schema_name VARCHAR;
-    v_source_table_name VARCHAR;
-    v_comments_to_apply INTEGER;
+  SELECT DISTINCT SOURCE_DATABASE_NAME, SOURCE_SCHEMA_NAME, SOURCE_TABLE_NAME, COUNT(*) OVER () as comments_to_apply
+  INTO :v_source_database_name, :v_source_schema_name, :v_source_table_name, :v_comments_to_apply
+  FROM COMMENT_PROPAGATION_STAGING
+  WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL
+  LIMIT 1;
+
+  IF (v_comments_to_apply = 0 OR v_source_database_name IS NULL) THEN
+    LET info_msg := 'No comments to apply for RUN_ID: ' || P_RUN_ID;
+    SYSTEM$LOG_INFO(info_msg);
+    RETURN info_msg;
+  END IF;
+
+  v_table_fqn := SAFE_QUOTE(v_source_database_name) || '.' || SAFE_QUOTE(v_source_schema_name) || '.' || SAFE_QUOTE(v_source_table_name);
+  SYSTEM$SET_SPAN_ATTRIBUTES({'target_table_fqn': :v_table_fqn});
+  SYSTEM$ADD_EVENT('Applying comments', {'comments_to_apply': :v_comments_to_apply});
+  
+  SELECT LISTAGG(CONCAT('COLUMN ', SAFE_QUOTE(SOURCE_COLUMN_NAME), ' COMMENT ''', REPLACE(TARGET_COMMENT, '''', ''''''), ''''), ', ')
+  INTO alter_sql
+  FROM COMMENT_PROPAGATION_STAGING
+  WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL;
+
   BEGIN
-    SELECT DISTINCT SOURCE_DATABASE_NAME, SOURCE_SCHEMA_NAME, SOURCE_TABLE_NAME, COUNT(*) OVER () as comments_to_apply
-    INTO :v_source_database_name, :v_source_schema_name, :v_source_table_name, :v_comments_to_apply
-    FROM IDENTIFIER(:staging_table_fqn)
-    WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL
-    LIMIT 1;
-
-    IF (v_comments_to_apply = 0 OR v_source_database_name IS NULL) THEN
-      RETURN 'No comments to apply for RUN_ID: ' || P_RUN_ID;
-    END IF;
-
-    v_table_fqn := SAFE_QUOTE(v_source_database_name) || '.' || SAFE_QUOTE(v_source_schema_name) || '.' || SAFE_QUOTE(v_source_table_name);
-    
-    SELECT LISTAGG(CONCAT('COLUMN ', SAFE_QUOTE(SOURCE_COLUMN_NAME), ' COMMENT ''', REPLACE(TARGET_COMMENT, '''', ''''''), ''''), ', ')
-    INTO alter_sql
-    FROM IDENTIFIER(:staging_table_fqn)
-    WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL;
-
-    BEGIN
-        EXECUTE IMMEDIATE 'ALTER TABLE IDENTIFIER(:v_table_fqn) MODIFY ' || alter_sql;
-        UPDATE IDENTIFIER(:staging_table_fqn)
-        SET APPLICATION_STATUS = 'APPLIED', APPLICATION_TIMESTAMP = :v_application_timestamp
-        WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL;
-        total_comments_applied := total_comments_applied + v_comments_to_apply;
-    EXCEPTION
-        WHEN OTHER THEN
-            SELECT LISTAGG(SOURCE_COLUMN_NAME, ', ')
-            INTO :v_failed_columns
-            FROM IDENTIFIER(:staging_table_fqn)
-            WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL;
-            err_msg := 'Failed to apply ' || v_comments_to_apply || ' comment(s) for table ' || v_table_fqn || '. Columns: [' || :v_failed_columns || ']. Error: ' || SQLERRM;
-            SYSTEM$LOG_ERROR(err_msg);
-            UPDATE IDENTIFIER(:staging_table_fqn)
-            SET APPLICATION_STATUS = 'SKIPPED', APPLICATION_TIMESTAMP = :v_application_timestamp
-            WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL;
-            total_comments_skipped := total_comments_skipped + v_comments_to_apply;
-    END;
+              EXECUTE IMMEDIATE 'ALTER TABLE ' || v_table_fqn || ' MODIFY ' || alter_sql;
+      UPDATE COMMENT_PROPAGATION_STAGING
+      SET APPLICATION_STATUS = 'APPLIED', APPLICATION_TIMESTAMP = :v_application_timestamp
+      WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL;
+      total_comments_applied := total_comments_applied + v_comments_to_apply;
+  EXCEPTION
+      WHEN OTHER THEN
+          SELECT LISTAGG(SOURCE_COLUMN_NAME, ', ')
+          INTO :v_failed_columns
+          FROM COMMENT_PROPAGATION_STAGING
+          WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL;
+          err_msg := 'Failed to apply ' || v_comments_to_apply || ' comment(s) for table ' || v_table_fqn || '. Columns: [' || :v_failed_columns || ']. Error: ' || SQLERRM;
+          SYSTEM$LOG_ERROR(err_msg);
+          UPDATE COMMENT_PROPAGATION_STAGING
+          SET APPLICATION_STATUS = 'SKIPPED', APPLICATION_TIMESTAMP = :v_application_timestamp
+          WHERE RUN_ID = :P_RUN_ID AND STATUS = 'COMMENT_FOUND' AND APPLICATION_STATUS IS NULL;
+          total_comments_skipped := total_comments_skipped + v_comments_to_apply;
   END;
 
+
   LET success_msg := 'Success: Applied ' || total_comments_applied || ' comments and skipped ' || total_comments_skipped || ' for RUN_ID: ' || P_RUN_ID;
+  SYSTEM$ADD_EVENT('Finished applying comments', {'comments_applied': :total_comments_applied, 'comments_skipped': :total_comments_skipped});
   SYSTEM$LOG_INFO(success_msg);
   RETURN success_msg;
 END;
 $$;
 
-ALTER PROCEDURE APPLY_COMMENT_PROPAGATION_DATA(VARCHAR) SET AUTO_EVENT_LOGGING = 'TRACING';
+ALTER PROCEDURE APPLY_COMMENT_PROPAGATION_DATA(VARCHAR) SET AUTO_EVENT_LOGGING = 'ALL';

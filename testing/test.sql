@@ -14,6 +14,10 @@
 SET DEPLOY_DATABASE = 'COMMON';
 SET DEPLOY_SCHEMA = 'COMMENT_PROPAGATION';
 
+-- Set the context for the test run
+USE ROLE SYSADMIN;
+USE DATABASE IDENTIFIER($DEPLOY_DATABASE);
+
 -- *********************************************************************************************************************
 -- 2. SETUP: Create a dedicated test schema and tables.
 -- *********************************************************************************************************************
@@ -49,13 +53,19 @@ SET APPLY_PROC_FQN = $DEPLOY_DATABASE || '.' || $DEPLOY_SCHEMA || '.APPLY_COMMEN
 SET STAGING_TABLE_FQN = $DEPLOY_DATABASE || '.' || $DEPLOY_SCHEMA || '.COMMENT_PROPAGATION_STAGING';
 
 -- Call the procedure to find and record comments for FINAL_TABLE.
-SET TEST_DB = CURRENT_DATABASE();
+SET TEST_DB = $DEPLOY_DATABASE;
 SET TEST_SCHEMA_NAME = 'TEST_SCHEMA';
 SET record_call_stmt = 'CALL ' || $RECORD_PROC_FQN || ' (''' || $TEST_DB || ''', ''' || $TEST_SCHEMA_NAME || ''', ''FINAL_TABLE'')';
 EXECUTE IMMEDIATE $record_call_stmt;
 
-SET CALL_RESULT = (SELECT "RECORD_COMMENT_PROPAGATION_DATA" FROM TABLE(RESULT_SCAN(LAST_QUERY_ID())));
-SET RUN_ID = SPLIT_PART($CALL_RESULT, 'RUN_ID: ', 2);
+-- Get the RUN_ID from the most recent entry in the staging table.
+-- This is more robust than parsing the result of the stored procedure.
+SET RUN_ID = (
+    SELECT RUN_ID
+    FROM IDENTIFIER($STAGING_TABLE_FQN)
+    ORDER BY RECORD_TIMESTAMP DESC
+    LIMIT 1
+);
 
 -- *********************************************************************************************************************
 -- 4. VERIFICATION (Part 1): Check the staging table for correct status and comments.
@@ -71,10 +81,15 @@ DECLARE
   v_no_comment_count INTEGER;
   v_total_count INTEGER;
   assertion_failed EXCEPTION (-20001, 'An assertion failed.');
-  query VARCHAR;
 BEGIN
-  query := 'SELECT COUNT_IF(STATUS = ''COMMENT_FOUND''), COUNT_IF(STATUS = ''MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE''), COUNT_IF(STATUS = ''NO_COMMENT_FOUND''), COUNT(*) FROM IDENTIFIER(:STAGING_TABLE) WHERE RUN_ID = :RUN_ID_PARAM';
-  EXECUTE IMMEDIATE query INTO :v_comment_found_count, :v_multiple_cols_count, :v_no_comment_count, :v_total_count;
+  SELECT
+    COUNT_IF(STATUS = 'COMMENT_FOUND'),
+    COUNT_IF(STATUS = 'MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE'),
+    COUNT_IF(STATUS = 'NO_COMMENT_FOUND'),
+    COUNT(*)
+  INTO :v_comment_found_count, :v_multiple_cols_count, :v_no_comment_count, :v_total_count
+  FROM IDENTIFIER(:STAGING_TABLE)
+  WHERE RUN_ID = :RUN_ID_PARAM;
 
   IF (v_comment_found_count != 1) THEN RAISE assertion_failed; END IF;
   IF (v_multiple_cols_count != 1) THEN RAISE assertion_failed; END IF;
