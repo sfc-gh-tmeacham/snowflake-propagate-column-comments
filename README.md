@@ -19,6 +19,18 @@ This two-step process allows you to review the suggested comments before applyin
 
 ## How It Works
 
+```mermaid
+graph TD;
+    A[Start] --> B["Call<br/>RECORD_COMMENT_PROPAGATION_DATA"];
+    B --> C["Procedure:<br/>1. Finds uncommented columns<br/>2. Traces lineage<br/>3. Records suggestions in<br/>COMMENT_PROPAGATION_STAGING"];
+    C --> D{Review Staging Table};
+    D -- Suggestions look good --> E["Call<br/>APPLY_COMMENT_PROPAGATION_DATA"];
+    E --> F["Procedure:<br/>Applies comments where<br/>STATUS = 'COMMENT_FOUND'"];
+    F --> G[End];
+    D -- Manual review needed --> H["Manually investigate or<br/>ignore the run"];
+    H --> G;
+```
+
 The solution uses a single deployment script (`deploy.sql`) to create all the necessary database objects. The core logic is contained within the `RECORD_COMMENT_PROPAGATION_DATA` procedure, which operates as follows:
 
 1. **Finds Uncommented Columns**: It first identifies all columns in the target table that have `NULL` or empty comments.
