@@ -231,72 +231,64 @@ BEGIN
         TARGET_COMMENT, LINEAGE_DISTANCE, STATUS
     )
     WITH
-    -- First, identify the closest lineage distance for each source column.
+    -- 1. Find the minimum distance to any ancestor for each column.
     min_lineage_distance AS (
-        SELECT
-            source_column_fqn,
-            MIN(DISTANCE) as min_distance
+        SELECT source_column_fqn, MIN(DISTANCE) as min_distance
         FROM temp_lineage
         GROUP BY source_column_fqn
     ),
-    -- Then, count how many parents exist at that minimum distance.
-    closest_parents AS (
+    -- 2. Count how many parents exist at that closest distance.
+    closest_parent_counts AS (
         SELECT
-            lin.source_column_fqn,
-            lin.min_distance,
-            COUNT(*) as parent_count
-        FROM min_lineage_distance lin
-        JOIN temp_lineage tl
-          ON lin.source_column_fqn = tl.source_column_fqn AND lin.min_distance = tl.DISTANCE
-        GROUP BY lin.source_column_fqn, lin.min_distance
+            mld.source_column_fqn,
+            COUNT(tl.TARGET_COLUMN_NAME) as parent_count
+        FROM min_lineage_distance mld
+        JOIN temp_lineage tl ON mld.source_column_fqn = tl.source_column_fqn AND mld.min_distance = tl.DISTANCE
+        GROUP BY mld.source_column_fqn
     ),
-    -- Finally, join back to get the comment only if there is a single parent.
-    COMMENT_PROPAGATION_LOGIC AS (
+    -- 3. For columns with a single parent, find the comment.
+    single_parent_details AS (
         SELECT
-            uc.source_database_name,
-            uc.source_schema_name,
-            uc.source_table_name,
-            uc.source_column_name,
-            uc.source_column_fqn,
+            tl.source_column_fqn,
             c.table_catalog AS target_database_name,
             c.table_schema AS target_schema_name,
             c.table_name AS target_table_name,
             c.column_name AS target_column_name,
             SAFE_QUOTE(c.table_catalog) || '.' || SAFE_QUOTE(c.table_schema) || '.' || SAFE_QUOTE(c.table_name) || '.' || SAFE_QUOTE(c.column_name) as target_column_fqn,
             c.comment AS target_comment,
-            cp.min_distance AS lineage_distance,
-            CASE
-                WHEN cp.parent_count > 1 THEN 'MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE'
-                WHEN c.comment IS NOT NULL AND c.comment <> '' THEN 'COMMENT_FOUND'
-                ELSE 'NO_COMMENT_FOUND'
-            END as status
-        FROM temp_uncommented_columns uc
-        LEFT JOIN closest_parents cp
-          ON uc.source_column_fqn = cp.source_column_fqn
-        LEFT JOIN temp_lineage tl
-          ON cp.source_column_fqn = tl.source_column_fqn AND cp.min_distance = tl.DISTANCE AND cp.parent_count = 1
+            tl.DISTANCE AS lineage_distance
+        FROM temp_lineage tl
         LEFT JOIN temp_all_upstream_column_comments c
           ON tl.TARGET_OBJECT_DATABASE = c.table_catalog
           AND tl.TARGET_OBJECT_SCHEMA = c.table_schema
           AND tl.TARGET_OBJECT_NAME = c.table_name
           AND tl.TARGET_COLUMN_NAME = c.column_name
+        WHERE (tl.source_column_fqn, tl.DISTANCE) IN (SELECT source_column_fqn, min_distance FROM min_lineage_distance)
+          AND tl.source_column_fqn IN (SELECT source_column_fqn FROM closest_parent_counts WHERE parent_count = 1)
     )
+    -- 4. Combine all logic to determine the final status for each uncommented column.
     SELECT
         :run_id,
-        source_database_name,
-        source_schema_name,
-        source_table_name,
-        source_column_name,
-        source_column_fqn,
-        target_database_name,
-        target_schema_name,
-        target_table_name,
-        target_column_name,
-        target_column_fqn,
-        target_comment,
-        lineage_distance,
-        status
-    FROM COMMENT_PROPAGATION_LOGIC;
+        uc.source_database_name,
+        uc.source_schema_name,
+        uc.source_table_name,
+        uc.source_column_name,
+        uc.source_column_fqn,
+        spd.target_database_name,
+        spd.target_schema_name,
+        spd.target_table_name,
+        spd.target_column_name,
+        spd.target_column_fqn,
+        spd.target_comment,
+        spd.lineage_distance,
+        CASE
+            WHEN cpc.parent_count > 1 THEN 'MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE'
+            WHEN spd.target_comment IS NOT NULL AND spd.target_comment <> '' THEN 'COMMENT_FOUND'
+            ELSE 'NO_COMMENT_FOUND'
+        END as status
+    FROM temp_uncommented_columns uc
+    LEFT JOIN closest_parent_counts cpc ON uc.source_column_fqn = cpc.source_column_fqn
+    LEFT JOIN single_parent_details spd ON uc.source_column_fqn = spd.source_column_fqn;
 
       rows_inserted := SQLROWCOUNT;
 
@@ -393,9 +385,9 @@ BEGIN
     
     -- Dynamically construct a single ALTER TABLE statement that updates all column comments for the table in one operation.
     SELECT
-      'ALTER TABLE ' || :v_table_fqn || ' MODIFY COLUMN ' ||
+      'ALTER TABLE ' || :v_table_fqn || ' MODIFY ' ||
       LISTAGG(
-          CONCAT(SAFE_QUOTE(SOURCE_COLUMN_NAME), ' COMMENT ''', REPLACE(TARGET_COMMENT, '''', ''''''), ''''),
+          CONCAT('COLUMN ', SAFE_QUOTE(SOURCE_COLUMN_NAME), ' COMMENT ''', REPLACE(TARGET_COMMENT, '''', ''''''), ''''),
           ', '
       )
     INTO
