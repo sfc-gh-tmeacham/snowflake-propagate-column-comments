@@ -1,5 +1,7 @@
 # Snowflake Propagate Column Comments
 
+**Version 0.5**
+
 This project provides a Snowflake stored procedure to automate the propagation of column comments from ancestor tables (i.e., upstream sources) to descendant tables (i.e., downstream targets) using data lineage.
 
 ## Objective
@@ -97,3 +99,7 @@ The project includes a robust and simplified test suite (`testing/test.sql`) tha
 *   **`NO_COMMENT_FOUND`**: Tests that a column whose parent has no comment is correctly flagged.
 
 To run the tests, execute `testing/test.sql` after deploying the solution.
+
+## Disclaimer
+
+This project is provided as-is and is not officially supported by Snowflake. Use it at your own risk. The author and contributors are not responsible for any issues or damages that may arise from its use. It is highly recommended to test this solution thoroughly in a non-production environment before deploying it in a production setting.
