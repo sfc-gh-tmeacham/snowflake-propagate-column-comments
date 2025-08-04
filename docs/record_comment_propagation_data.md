@@ -87,9 +87,9 @@ This is the final and most critical step, where the procedure analyzes the colle
 - **`closest_parent_counts`**: Counts how many parents exist at that closest distance.
 - **`single_parent_details`**: Gathers the details for columns that have only one parent at the closest distance.
 - **Final `SELECT`**: Joins all the CTEs and determines the final `STATUS` based on the following logic:
-    - If `parent_count > 1`, the status is `MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE`.
-    - If a `target_comment` is found for a single parent, the status is `COMMENT_FOUND`.
-    - Otherwise, the status is `NO_COMMENT_FOUND`.
+  - If `parent_count > 1`, the status is `MULTIPLE_COLUMNS_FOUND_AT_SAME_DISTANCE`.
+  - If a `target_comment` is found for a single parent, the status is `COMMENT_FOUND`.
+  - Otherwise, the status is `NO_COMMENT_FOUND`.
 
 The results, including the generated `RUN_ID`, are then inserted into the `COMMENT_PROPAGATION_STAGING` table.
 
