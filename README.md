@@ -104,6 +104,16 @@ The project includes a robust and simplified test suite (`testing/test.sql`) tha
 
 To run the tests, execute `testing/test.sql` after deploying the solution.
 
+## Alternative Solutions
+
+### Snowflake Cortex AI
+
+It is worth noting that Snowflake offers a native feature that uses generative AI to suggest comments for tables and columns. This feature, powered by Snowflake Cortex, can generate descriptions based on object metadata and sample data.
+
+This project differs in that it uses a deterministic, lineage-based approach rather than a generative one. It is designed for scenarios where you want to enforce consistency by propagating existing, human-curated comments down through a data pipeline.
+
+For more information on the native AI feature, see the [Snowflake documentation on generating descriptions with Cortex](https://docs.snowflake.com/en/user-guide/ui-snowsight-cortex-descriptions).
+
 ## Limitations and Considerations
 
 This solution relies entirely on the `SNOWFLAKE.CORE.GET_LINEAGE` function. As such, it is subject to the same limitations as the underlying function. The most important considerations are:
