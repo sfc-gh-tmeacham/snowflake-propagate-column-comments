@@ -63,7 +63,9 @@ The deployment script is parameterized to allow you to control where the solutio
 
 ## Usage
 
-The comment propagation process is a two-step process:
+The comment propagation process is a two-step process.
+
+> **Note**: If your current session context is in a different database or schema than where you deployed the procedures, you will need to use the fully qualified name (FQN) of the procedure (e.g., `my_db.my_schema.procedure_name(...)`).
 
 ### 1. Record Comment Suggestions
 
@@ -99,6 +101,7 @@ WHERE RUN_ID = $RUN_ID_TO_REVIEW;
 ```
 
 #### Example with a hardcoded table name
+
 If you prefer not to use session variables, you can query the table directly by replacing the database and schema with your own deployment locations:
 
 ```sql
