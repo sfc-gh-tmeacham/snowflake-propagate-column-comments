@@ -34,7 +34,7 @@ The solution uses a single deployment script (`deploy.sql`) to create all the ne
 
 This procedure relies on `SNOWFLAKE.CORE.GET_LINEAGE` and the `INFORMATION_SCHEMA` for each upstream database. To ensure proper execution, the procedure should be created and run by a role with `USAGE` on all upstream databases.
 
-For more information, see the [Snowflake documentation on `GET_LINEAGE`](https://docs.snowflake.com/en/sql-reference/functions/get_lineage-snowflake-core).
+For more information, see the [Snowflake documentation on `GET_LINEAGE`](https://docs.snowflake.com/en/sql-reference/functions/get_lineage-snowflake-core). Note that this feature requires Snowflake Enterprise Edition (or higher).
 
 ## Setup
 
