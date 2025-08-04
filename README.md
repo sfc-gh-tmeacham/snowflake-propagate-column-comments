@@ -91,10 +91,21 @@ SET DEPLOY_DATABASE = 'COMMON';
 SET DEPLOY_SCHEMA = 'COMMENT_PROPAGATION';
 SET RUN_ID_TO_REVIEW = 'your_run_id'; -- Replace with the actual RUN_ID
 
--- Query the staging table using the fully qualified name
+-- Query the staging table using a dynamically constructed qualified name
+SET STAGING_TABLE_FQN = $DEPLOY_DATABASE || '.' || $DEPLOY_SCHEMA || '.COMMENT_PROPAGATION_STAGING';
 SELECT *
-FROM IDENTIFIER($DEPLOY_DATABASE || '.' || $DEPLOY_SCHEMA || '.COMMENT_PROPAGATION_STAGING')
+FROM IDENTIFIER($STAGING_TABLE_FQN)
 WHERE RUN_ID = $RUN_ID_TO_REVIEW;
+```
+
+#### Example with a hardcoded table name
+If you prefer not to use session variables, you can query the table directly by replacing the database and schema with your own deployment locations:
+
+```sql
+-- Replace with your actual database, schema, and RUN_ID
+SELECT *
+FROM COMMON.COMMENT_PROPAGATION.COMMENT_PROPAGATION_STAGING
+WHERE RUN_ID = 'your_run_id';
 ```
 
 ### 3. Apply the Comments
