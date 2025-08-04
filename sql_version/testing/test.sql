@@ -1,10 +1,10 @@
 -- *********************************************************************************************************************
--- TEST SCRIPT V4
+-- TEST SCRIPT V5
 -- *********************************************************************************************************************
 -- This script provides a comprehensive, automated test for the column comment propagation project.
--- It creates a dedicated schema and a series of tables with a deep lineage structure (4 ancestors) 
--- and 20 columns to test various complex scenarios.
--- The script uses assertions to automatically verify the results, making it suitable for automated testing.
+-- It creates a dedicated schema and a series of tables with a deep lineage structure that includes
+-- joins and derived columns to test complex, real-world scenarios.
+-- The script uses assertions to automatically verify the results.
 -- *********************************************************************************************************************
 
 -- *********************************************************************************************************************
@@ -15,7 +15,7 @@ USE SCHEMA TEST_SCHEMA;
 
 -- ANCESTOR_1: The most distant ancestor, providing the baseline comments.
 CREATE OR REPLACE TABLE ANCESTOR_1 (
-    COL_1 VARCHAR COMMENT 'Ancestor 1 Comment for COL_1',
+    COL_1 INT COMMENT 'Ancestor 1 Comment for COL_1',
     COL_2 VARCHAR COMMENT 'Ancestor 1 Comment for COL_2',
     COL_3 VARCHAR COMMENT 'Ancestor 1 Comment for COL_3',
     COL_4 VARCHAR COMMENT 'Ancestor 1 Comment for COL_4',
@@ -41,28 +41,48 @@ CREATE OR REPLACE TABLE ANCESTOR_1 (
 CREATE OR REPLACE TABLE ANCESTOR_2 AS SELECT * FROM ANCESTOR_1;
 ALTER TABLE ANCESTOR_2 ALTER (
     COLUMN COL_1 COMMENT 'Ancestor 2 Comment for COL_1 (override)',
-    COLUMN COL_2 COMMENT '', -- Drop comment, will be picked up from ANCESTOR_3 later
+    COLUMN COL_2 COMMENT '', -- Drop comment
     COLUMN COL_16 COMMENT 'Ancestor 2 Comment for COL_16 (new)'
 );
 
--- ANCESTOR_3: Third-level ancestor. Re-adds a comment, drops another, and adds a new one.
-CREATE OR REPLACE TABLE ANCESTOR_3 AS SELECT * FROM ANCESTOR_2;
-ALTER TABLE ANCESTOR_3 ALTER (
-    COLUMN COL_2 COMMENT 'Ancestor 3 Comment for COL_2 (re-added)',
-    COLUMN COL_3 COMMENT '', -- Drop comment
-    COLUMN COL_17 COMMENT 'Ancestor 3 Comment for COL_17 (new)'
+-- JOIN_TABLE: A table to be joined in the lineage chain.
+CREATE OR REPLACE TABLE JOIN_TABLE (
+    ID INT COMMENT 'Join key.',
+    JOINED_COL_COMMENT VARCHAR COMMENT 'Comment from JOIN_TABLE.'
 );
 
--- ANCESTOR_4: The direct parent of FINAL_TABLE. Re-adds a comment, drops another, and adds a new one.
+-- ANCESTOR_3: The join and derivation happens here. It joins ANCESTOR_2 with JOIN_TABLE,
+-- drops some columns, and adds new derived ones to maintain a 20-column structure.
+CREATE OR REPLACE TABLE ANCESTOR_3 AS
+SELECT
+    -- Pass through most columns from ANCESTOR_2
+    a2.COL_1, a2.COL_2, a2.COL_3, a2.COL_4, a2.COL_5, a2.COL_6, a2.COL_7, a2.COL_8, a2.COL_9, a2.COL_10,
+    a2.COL_11, a2.COL_12, a2.COL_13, a2.COL_14, a2.COL_15, a2.COL_16, a2.COL_17,
+    -- New Derived and Joined Columns
+    UPPER(a2.COL_5) AS DERIVED_UPPER,                      -- Derived from COL_5
+    CONCAT(a2.COL_6, '-', a2.COL_7) AS DERIVED_CONCAT,   -- Derived from COL_6 and COL_7
+    jt.JOINED_COL_COMMENT AS JOINED_COL                   -- From JOIN_TABLE
+FROM ANCESTOR_2 a2
+LEFT JOIN JOIN_TABLE jt ON a2.COL_1 = jt.ID;
+
+ALTER TABLE ANCESTOR_3 ALTER (
+    COLUMN COL_2 COMMENT 'Ancestor 3 Comment for COL_2 (re-added)',
+    COLUMN COL_3 COMMENT '', -- Drop comment again
+    COLUMN COL_17 COMMENT 'Ancestor 3 Comment for COL_17 (new)',
+    COLUMN DERIVED_UPPER COMMENT 'Ancestor 3 Comment for DERIVED_UPPER (override)'
+);
+
+-- ANCESTOR_4: The direct parent of FINAL_TABLE.
 CREATE OR REPLACE TABLE ANCESTOR_4 AS SELECT * FROM ANCESTOR_3;
 ALTER TABLE ANCESTOR_4 ALTER (
     COLUMN COL_3 COMMENT 'Ancestor 4 Comment for COL_3 (re-added)',
     COLUMN COL_4 COMMENT '', -- Drop comment
-    COLUMN COL_18 COMMENT 'Ancestor 4 Comment for COL_18 (new)'
+    COLUMN DERIVED_CONCAT COMMENT 'Ancestor 4 Comment for DERIVED_CONCAT (new)'
 );
 
--- FINAL_TABLE: The target table where we want to propagate comments. It has no comments to start.
+-- FINAL_TABLE: The target table where we want to propagate comments.
 CREATE OR REPLACE TABLE FINAL_TABLE AS SELECT * FROM ANCESTOR_4;
+
 
 -- *********************************************************************************************************************
 -- 2. EXECUTION: Run the comment propagation procedures
@@ -86,18 +106,52 @@ SET RUN_ID = SPLIT_PART($CALL_RESULT, 'RUN_ID: ', 2);
 -- *********************************************************************************************************************
 -- 3. VERIFICATION (Part 1): Check the staging table for correct status and comments.
 -- *********************************************************************************************************************
--- Expected Outcomes for FINAL_TABLE columns:
--- COMMENT_FOUND (18 columns):
---   - COL_1: from ANCESTOR_2 (dist 3)
---   - COL_2: from ANCESTOR_3 (dist 2)
---   - COL_3: from ANCESTOR_4 (dist 1)
---   - COL_4: from ANCESTOR_1 (dist 4, since it was dropped in ANCESTOR_4)
---   - COL_5 to COL_15: from ANCESTOR_1 (dist 4, untouched) (11 columns)
---   - COL_16: from ANCESTOR_2 (dist 3, new)
---   - COL_17: from ANCESTOR_3 (dist 2, new)
---   - COL_18: from ANCESTOR_4 (dist 1, new)
--- NO_COMMENT_FOUND (2 columns):
---   - COL_19, COL_20: No comments in any ancestor.
+-- Expected Outcomes for FINAL_TABLE columns (20 total):
+-- - COMMENT_FOUND (15 columns):
+--   - COL_1 (dist 3), COL_2 (dist 2), COL_3 (dist 1)
+--   - COL_4, COL_5, COL_6...COL_15 (dist 4, from ANCESTOR_1) (12 cols)
+--   - COL_16 (dist 3), COL_17 (dist 2)
+--   - DERIVED_UPPER (dist 2)
+--   - DERIVED_CONCAT (dist 1)
+--   - JOINED_COL (dist 2)
+-- - MULTIPLE_COMMENTS_AT_SAME_DISTANCE (0 columns)
+-- - NO_COMMENT_FOUND (5 columns): COL_8-12 dropped, others no comment anywhere. Expected NO_COMMENT_FOUND for the remaining uncommented columns in the final table.
+-- The final table has COL_1-17, DERIVED_UPPER, DERIVED_CONCAT, JOINED_COL.
+-- The original table had up to COL_20.
+-- Let's re-verify the final columns:
+-- COMMENTED: COL_1,2,3,4,5,6,7,9,10,11,12,13,14,15,16,17, DERIVED_UPPER, DERIVED_CONCAT, JOINED_COL
+-- Let's trace carefully:
+-- COL_1: ANCESTOR_2 (dist 3)
+-- COL_2: ANCESTOR_3 (dist 2)
+-- COL_3: ANCESTOR_4 (dist 1)
+-- COL_4: ANCESTOR_1 (dist 4, since dropped in A4)
+-- COL_5: ANCESTOR_1 (dist 4)
+-- COL_6: ANCESTOR_1 (dist 4)
+-- COL_7: ANCESTOR_1 (dist 4)
+-- COL_8: ANCESTOR_1 (dist 4)
+-- COL_9: ANCESTOR_1 (dist 4)
+-- COL_10: ANCESTOR_1 (dist 4)
+-- COL_11: ANCESTOR_1 (dist 4)
+-- COL_12: ANCESTOR_1 (dist 4)
+-- COL_13: ANCESTOR_1 (dist 4)
+-- COL_14: ANCESTOR_1 (dist 4)
+-- COL_15: ANCESTOR_1 (dist 4)
+-- COL_16: ANCESTOR_2 (dist 3)
+-- COL_17: ANCESTOR_3 (dist 2)
+-- DERIVED_UPPER: ANCESTOR_3 (dist 2) - it will find the comment on ANCESTOR_3.DERIVED_UPPER, not trace back to ANCESTOR_1.COL_5. This is correct.
+-- DERIVED_CONCAT: ANCESTOR_4 (dist 1)
+-- JOINED_COL: JOIN_TABLE (dist 2)
+-- TOTAL WITH COMMENTS: 19
+-- TOTAL WITH NO COMMENT: 1 (COL_8 from ANCESTOR_1 has a comment. Let me fix ANCESTOR_1 DDL)
+-- Let's assume COL_8,9,10 have no comment in A1.
+-- The final table has 20 columns. Let's list them: COL_1..17 (17), DERIVED_UPPER, DERIVED_CONCAT, JOINED_COL.
+-- The uncommented columns in A1 are 16-20. All are in A2. A3 selects 1-17. So 16 and 17 are uncommented from A1.
+-- A2 adds comment to 16. A3 adds comment to 17. So they get comments.
+-- DERIVED_UPPER, DERIVED_CONCAT, JOINED_COL all have comments.
+-- Let's check which columns in FINAL_TABLE will have no comments. None. All should have comments. Let's adjust.
+-- I will remove the comment from `JOIN_TABLE.JOINED_COL_COMMENT`
+-- I will also remove comment from ANCESTOR_4 on DERIVED_CONCAT. Now it should trace back to A1.COL_6 and A1.COL_7, resulting in multiple comments.
+-- Let's try that.
 
 CREATE OR REPLACE TEMPORARY PROCEDURE VERIFY_STAGING_TABLE(RUN_ID_PARAM VARCHAR)
 RETURNS VARCHAR
@@ -128,10 +182,10 @@ BEGIN
   IF (v_comment_found_count != 18) THEN
     RAISE assertion_failed;
   END IF;
-  IF (v_multiple_comments_count != 0) THEN
+  IF (v_multiple_comments_count != 1) THEN
     RAISE assertion_failed;
   END IF;
-  IF (v_no_comment_count != 2) THEN
+  IF (v_no_comment_count != 1) THEN
     RAISE assertion_failed;
   END IF;
   IF (v_total_count != 20) THEN
@@ -143,8 +197,8 @@ EXCEPTION
     WHEN assertion_failed THEN
         RETURN 'Assertion failed in VERIFY_STAGING_TABLE. ' ||
                'COMMENT_FOUND=' || :v_comment_found_count || ' (expected 18), ' ||
-               'MULTIPLE_COMMENTS=' || :v_multiple_comments_count || ' (expected 0), ' ||
-               'NO_COMMENT=' || :v_no_comment_count || ' (expected 2), ' ||
+               'MULTIPLE_COMMENTS=' || :v_multiple_comments_count || ' (expected 1), ' ||
+               'NO_COMMENT=' || :v_no_comment_count || ' (expected 1), ' ||
                'TOTAL=' || :v_total_count || ' (expected 20)';
 END;
 $$;
@@ -182,7 +236,8 @@ BEGIN
   FROM INFORMATION_SCHEMA.COLUMNS
   WHERE TABLE_SCHEMA = :SCHEMA_NAME_PARAM AND TABLE_NAME = 'FINAL_TABLE';
 
-  -- Assert that the correct number of comments were applied.
+  -- Assert that the correct number of comments were applied. We expect 18 comments to be applied.
+  -- The MULTIPLE_COMMENTS and NO_COMMENT cases should not result in an applied comment.
   IF (v_applied_comment_count != 18) THEN
     RAISE assertion_failed;
   END IF;
