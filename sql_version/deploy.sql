@@ -85,14 +85,6 @@ DECLARE
   db_info_schema_fqn VARCHAR;
   tables_view_fqn VARCHAR;
   columns_view_fqn VARCHAR;
-  insert_query VARCHAR;
-  db_name VARCHAR;
-
-  -- Cursor variables
-  c1 CURSOR FOR SELECT source_column_fqn FROM temp_uncommented_columns;
-  v_column_fqn VARCHAR;
-  
-  c2 CURSOR FOR SELECT DISTINCT TARGET_OBJECT_DATABASE FROM temp_upstream_objects WHERE TARGET_OBJECT_DATABASE IS NOT NULL;
 
 BEGIN
   -- Validate that input parameters are not NULL.
@@ -145,7 +137,7 @@ BEGIN
     v_count := SQLROWCOUNT;
     SYSTEM$ADD_EVENT('Step 1: Find uncommented columns - Finished', {'uncommented_column_count': :v_count});
 
-    -- Step 2: Create the lineage table and iterate through each uncommented column to get its lineage.
+    -- Step 2: Create the lineage table and get lineage for all uncommented columns in a single query.
     SYSTEM$ADD_EVENT('Step 2: Discover lineage - Started');
     CREATE OR REPLACE TEMPORARY TABLE temp_lineage (
         source_column_fqn VARCHAR,
@@ -156,15 +148,25 @@ BEGIN
         DISTANCE INTEGER
     );
 
-    OPEN c1;
-    FETCH c1 INTO v_column_fqn;
-    WHILE (v_column_fqn IS NOT NULL) DO
-        INSERT INTO temp_lineage (source_column_fqn, TARGET_OBJECT_DATABASE, TARGET_OBJECT_SCHEMA, TARGET_OBJECT_NAME, TARGET_COLUMN_NAME, DISTANCE)
-        SELECT :v_column_fqn, l.SOURCE_OBJECT_DATABASE, l.SOURCE_OBJECT_SCHEMA, l.SOURCE_OBJECT_NAME, l.SOURCE_COLUMN_NAME, l.DISTANCE
-        FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(:v_column_fqn, 'COLUMN', 'UPSTREAM')) l;
-        FETCH c1 INTO v_column_fqn;
-    END WHILE;
-    CLOSE c1;
+    -- Dynamically construct a single query that unions all GET_LINEAGE calls.
+    DECLARE
+      lineage_union_query VARCHAR;
+      full_lineage_query VARCHAR;
+    BEGIN
+      SELECT LISTAGG(
+          'SELECT ''' || REPLACE(c.source_column_fqn, '''', '''''') || ''', ' ||
+          'l.SOURCE_OBJECT_DATABASE, l.SOURCE_OBJECT_SCHEMA, l.SOURCE_OBJECT_NAME, l.SOURCE_COLUMN_NAME, l.DISTANCE ' ||
+          'FROM TABLE(SNOWFLAKE.CORE.GET_LINEAGE(''' || REPLACE(c.source_column_fqn, '''', '''''') || ''', ''COLUMN'', ''UPSTREAM'')) l',
+          ' UNION ALL '
+      )
+      INTO :lineage_union_query
+      FROM temp_uncommented_columns c;
+
+      IF (lineage_union_query IS NOT NULL AND lineage_union_query <> '') THEN
+          full_lineage_query := 'INSERT INTO temp_lineage (source_column_fqn, TARGET_OBJECT_DATABASE, TARGET_OBJECT_SCHEMA, TARGET_OBJECT_NAME, TARGET_COLUMN_NAME, DISTANCE) ' || lineage_union_query;
+          EXECUTE IMMEDIATE :full_lineage_query;
+      END IF;
+    END;
 
     SELECT COUNT(*) INTO :v_count FROM temp_lineage;
     SYSTEM$ADD_EVENT('Step 2: Discover lineage - Finished', {'lineage_path_count': :v_count});
@@ -192,41 +194,29 @@ BEGIN
     );
     SYSTEM$ADD_EVENT('Step 4: Prepare comments table - Finished');
 
-    -- Step 5: For each upstream database, get comments only for the specific columns identified in the lineage.
+    -- Step 5: Gather all upstream comments in a single dynamic query.
     SYSTEM$ADD_EVENT('Step 5: Gather comments - Started');
-    LET temp_table_for_dynamic_sql := 'temp_all_upstream_column_comments_' || REPLACE(UUID_STRING(), '-', '_');
-    EXECUTE IMMEDIATE 'CREATE OR REPLACE TEMPORARY TABLE ' || temp_table_for_dynamic_sql || ' (table_catalog VARCHAR, table_schema VARCHAR, table_name VARCHAR, column_name VARCHAR, comment VARCHAR)';
-    
-    OPEN c2;
-    FETCH c2 INTO db_name;
-    WHILE (db_name IS NOT NULL) DO
-        SYSTEM$ADD_EVENT('Querying for comments', {'database_name': :db_name});
+    DECLARE
+      get_comments_query VARCHAR;
+    BEGIN
+      SELECT LISTAGG(
+          'SELECT DISTINCT icc.table_catalog, icc.table_schema, icc.table_name, icc.column_name, icc.comment ' ||
+          'FROM ' || SAFE_QUOTE(uo.TARGET_OBJECT_DATABASE) || '.INFORMATION_SCHEMA.COLUMNS AS icc ' ||
+          'JOIN temp_lineage tl ' ||
+          'ON tl.TARGET_OBJECT_DATABASE = icc.table_catalog ' ||
+          'AND tl.TARGET_OBJECT_SCHEMA = icc.table_schema ' ||
+          'AND tl.TARGET_OBJECT_NAME = icc.table_name ' ||
+          'AND tl.TARGET_COLUMN_NAME = icc.column_name ' ||
+          'WHERE icc.comment IS NOT NULL AND icc.comment <> ''''',
+          ' UNION ALL '
+      )
+      INTO :get_comments_query
+      FROM (SELECT DISTINCT TARGET_OBJECT_DATABASE FROM temp_upstream_objects) uo;
 
-        DECLARE
-            column_list_literal VARCHAR;
-        BEGIN
-            SELECT LISTAGG(
-                CONCAT('(\'', REPLACE(TARGET_OBJECT_SCHEMA, '''', ''''''), '\',\'', REPLACE(TARGET_OBJECT_NAME, '''', ''''''), '\',\'', REPLACE(TARGET_COLUMN_NAME, '''', ''''''), '\')'),
-                ', '
-            )
-            INTO :column_list_literal
-            FROM (SELECT DISTINCT TARGET_OBJECT_SCHEMA, TARGET_OBJECT_NAME, TARGET_COLUMN_NAME FROM temp_lineage WHERE TARGET_OBJECT_DATABASE = :db_name);
-
-            IF (column_list_literal IS NOT NULL AND column_list_literal <> '') THEN
-                insert_query := 'INSERT INTO ' || temp_table_for_dynamic_sql || ' (table_catalog, table_schema, table_name, column_name, comment) ' ||
-                                'SELECT c.table_catalog, c.table_schema, c.table_name, c.column_name, c.comment ' ||
-                                'FROM ' || SAFE_QUOTE(db_name) || '.INFORMATION_SCHEMA.COLUMNS c ' ||
-                                'WHERE (c.table_schema, c.table_name, c.column_name) IN (' || column_list_literal || ')' ||
-                                ' AND c.comment IS NOT NULL AND c.comment <> ''''';
-                EXECUTE IMMEDIATE :insert_query;
-            END IF;
-        END;
-        FETCH c2 INTO db_name;
-    END WHILE;
-    CLOSE c2;
-    
-    EXECUTE IMMEDIATE 'INSERT INTO temp_all_upstream_column_comments SELECT * FROM ' || temp_table_for_dynamic_sql;
-    EXECUTE IMMEDIATE 'DROP TABLE ' || temp_table_for_dynamic_sql;
+      IF (get_comments_query IS NOT NULL AND get_comments_query <> '') THEN
+        EXECUTE IMMEDIATE 'INSERT INTO temp_all_upstream_column_comments (table_catalog, table_schema, table_name, column_name, comment) ' || get_comments_query;
+      END IF;
+    END;
 
     SELECT COUNT(*) INTO :v_count FROM temp_all_upstream_column_comments;
     SYSTEM$ADD_EVENT('Step 5: Gather comments - Finished', {'total_comments_found': :v_count});
